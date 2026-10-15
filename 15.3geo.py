@@ -51,7 +51,7 @@ drawing_roi = False
 # --- VENTANA PRINCIPAL ---
 ventana = tk.Tk()
 ventana.geometry("1480x780")
-ventana.title("Detector de Objetos - Control Visión Optimizado")
+ventana.title("Detector de Objetos - Control Visión Preciso")
 ventana.configure(bg=BG)
 ventana.resizable(False, False)
 
@@ -91,6 +91,7 @@ def archivo():
     mostrar(LImagen, bgr, bgr=True)
     imagen_base_gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     recortar_imagen()
+    umbralizar()  # Actualizar umbral automáticamente al cargar
 
 
 def iniciar_camara():
@@ -141,9 +142,10 @@ def tomar_foto(event=None):
     imagen_base_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     mostrar(LImagen, imagen_base_gray)
     recortar_imagen()
+    umbralizar()  # Actualizar umbral automáticamente al tomar foto
 
 
-# --- FUNCIONES DE RECORTE INTERACTIVO POR RATÓN ---
+# --- FUNCIONES DE RECORTE INTERACTIVO ---
 def empezar_seleccion(event):
     global roi_start, roi_end, drawing_roi
     if imagen_base_gray is None:
@@ -172,6 +174,7 @@ def terminar_seleccion(event):
         return
     drawing_roi = False
     recortar_imagen()
+    umbralizar()  # Actualizar la umbralización según la nueva zona recortada
     if imagen_base_gray is not None:
         mostrar(LImagen, imagen_base_gray)
 
@@ -231,12 +234,15 @@ def recortar_imagen(event=None):
     return recortada
 
 
-def umbralizar(event=None):
-    recortada = recortar_imagen()
-    if recortada is None:
-        if event is None:
-            messagebox.showwarning("Aviso", "Primero carga o captura una imagen válida.")
+def umbralizar(val=None):
+    """Calcula y muestra la binarización en tiempo real."""
+    if imagen_base_gray is None:
         return None
+
+    recortada = recortar_imagen(event=True)
+    if recortada is None:
+        return None
+
     umb = int(SGray.get())
     _, binaria = cv2.threshold(recortada, umb, 255, cv2.THRESH_BINARY)
     mostrar(LImagenUmbral, binaria)
@@ -257,6 +263,17 @@ def guardar_patron():
         )
     else:
         messagebox.showerror("Error", "No se pudo guardar la imagen")
+
+
+def recortar_objeto_de_interes(img_bin):
+    cnts, _ = cv2.findContours(img_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return img_bin
+    cnt = max(cnts, key=cv2.contourArea)
+    x, y, w, h = cv2.boundingRect(cnt)
+    if w > 5 and h > 5:
+        return img_bin[y:y+h, x:x+w]
+    return img_bin
 
 
 def obtener_hu(imagen_bin):
@@ -303,59 +320,49 @@ def comparar_todo():
         messagebox.showwarning("Aviso", "No hay patrones guardados en la carpeta")
         return
 
-    img_evaluar = recortar_imagen()
+    img_evaluar = recortar_imagen(event=True)
     if img_evaluar is None:
         return
 
     umb = int(SGray.get())
     paso = max(1, int(SAngulo.get()))
     
-    # 1. Binarizar la imagen recortada para la evaluación actual
     _, img_bin = cv2.threshold(img_evaluar, umb, 255, cv2.THRESH_BINARY)
-    ih, iw = img_bin.shape[:2]
+    img_bin_crop = recortar_objeto_de_interes(img_bin)
+    ih, iw = img_bin_crop.shape[:2]
 
-    cnt_actual = contorno_mayor(img_bin)
-    hu_actual = obtener_hu(img_bin)
+    cnt_actual = contorno_mayor(img_bin_crop)
+    hu_actual = obtener_hu(img_bin_crop)
 
     res_tm, res_shapes, res_hu = [], [], []
     mejor_tm_val = -1.0
     mejor_patron_img = None
     nombre_mas_parecido = ""
 
-    # 2. Iterar sobre cada patrón umbralizado guardado
     for archivo_patron in archivos:
         path = os.path.join(CARPETA_PATRONES, archivo_patron)
         patron = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
         if patron is None:
             continue
 
-        # Asegurar binarización limpia del patrón cargado
         _, patron_bin = cv2.threshold(patron, 127, 255, cv2.THRESH_BINARY)
+        patron_crop = recortar_objeto_de_interes(patron_bin)
         nombre = os.path.splitext(archivo_patron)[0]
 
         best_v = -1.0
 
-        # Comparar normal y versión invertida para tolerar fondos blanco/negro
-        for p_eval in (patron_bin, cv2.bitwise_not(patron_bin)):
+        for p_eval in (patron_crop, cv2.bitwise_not(patron_crop)):
             for angulo in range(0, 360, paso):
                 rot = rotar_template(p_eval, angulo)
-                th, tw = rot.shape[:2]
+                rot_resized = cv2.resize(rot, (iw, ih), interpolation=cv2.INTER_NEAREST)
 
-                # Búsqueda multiescala
-                for scale in (0.7, 0.85, 1.0, 1.15):
-                    nw, nh = int(tw * scale), int(th * scale)
+                r = cv2.matchTemplate(img_bin_crop, rot_resized, cv2.TM_CCOEFF_NORMED)
+                _, v, _, _ = cv2.minMaxLoc(r)
 
-                    if nh >= ih or nw >= iw or nh < 10 or nw < 10:
-                        continue
+                if v > best_v:
+                    best_v = v
 
-                    rot_resized = cv2.resize(rot, (nw, nh), interpolation=cv2.INTER_NEAREST)
-                    r = cv2.matchTemplate(img_bin, rot_resized, cv2.TM_CCOEFF_NORMED)
-                    _, v, _, _ = cv2.minMaxLoc(r)
-
-                    if v > best_v:
-                        best_v = v
-
-        sim = best_v * 100 if best_v >= 0 else 0.0
+        sim = max(0.0, best_v * 100)
         res_tm.append((nombre, sim))
 
         if best_v > mejor_tm_val:
@@ -363,8 +370,7 @@ def comparar_todo():
             mejor_patron_img = patron_bin.copy()
             nombre_mas_parecido = nombre
 
-        # Comparación suplementaria de formas (matchShapes y Hu)
-        cnt_p = contorno_mayor(patron_bin)
+        cnt_p = contorno_mayor(patron_crop)
         score = (
             cv2.matchShapes(cnt_actual, cnt_p, cv2.CONTOURS_MATCH_I2, 0)
             if cnt_actual is not None and cnt_p is not None
@@ -372,7 +378,7 @@ def comparar_todo():
         )
         res_shapes.append((nombre, score))
 
-        hu_p = obtener_hu(patron_bin)
+        hu_p = obtener_hu(patron_crop)
         dist = (
             float(np.linalg.norm(np.array(hu_actual) - np.array(hu_p)))
             if hu_actual and hu_p
@@ -380,16 +386,13 @@ def comparar_todo():
         )
         res_hu.append((nombre, dist))
 
-    # Ordenar resultados de mayor a menor coincidencia
     res_tm.sort(key=lambda x: x[1], reverse=True)
     res_shapes.sort(key=lambda x: x[1])
     res_hu.sort(key=lambda x: x[1])
 
-    # 3. Mostrar la imagen umbralizada que MÁS SE PARECE
     if mejor_patron_img is not None:
         mostrar(LImagenResultado, mejor_patron_img, w=300, h=220)
 
-    # 4. Imprimir resultados en las consolas inferiores indicando la más parecida
     txt = f"{'Patrón':<18} {'Similitud':>10}\n" + "─" * 32 + "\n"
     for nom, sim in res_tm:
         marca = " ◀ (MÁS PARECIDO)" if nom == nombre_mas_parecido else ""
@@ -460,11 +463,12 @@ FContenedor2.pack(padx=8, pady=6)
 LImagen2 = tk.Label(FContenedor2, bg="#0f172a")
 LImagen2.pack(expand=True, fill="both")
 
-SGray = crear_scale(F1, "Umbral Binarización", 0, 255)
+# Vinculación de umbralizar() directamente a SGray mediante command
+SGray = crear_scale(F1, "Umbral Binarización", 0, 255, command=umbralizar)
 SGray.pack(fill="x", padx=8)
 
 SAngulo = crear_scale(F1, "Paso Angular Busqueda (°)", 1, 90)
-SAngulo.set(5)
+SAngulo.set(10)
 SAngulo.pack(fill="x", padx=8)
 
 # PANEL F2
