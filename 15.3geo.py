@@ -1,7 +1,6 @@
 import os
 from math import copysign, log10
 import cv2
-import imutils
 import numpy as np
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -12,7 +11,6 @@ CARPETA_PATRONES = "patrones_guardados"
 if not os.path.exists(CARPETA_PATRONES):
     os.makedirs(CARPETA_PATRONES)
 
-# Paleta de colores Modern Dark (Slate & Indigo)
 BG = "#0f172a"          # Fondo principal profundo
 PANEL = "#1e293b"       # Tarjetas / Paneles
 BORDER = "#334155"      # Bordes
@@ -20,7 +18,6 @@ ACCENT = "#3b82f6"      # Color primario
 TEXT_MAIN = "#f8fafc"   # Texto principal
 TEXT_MUTED = "#94a3b8"  # Texto secundario
 
-# Colores de botones por función
 BTN_BLUE = "#2563eb"
 BTN_CYAN = "#0284c7"
 BTN_GREEN = "#16a34a"
@@ -30,7 +27,6 @@ FONT_TITLE = ("Segoe UI", 10, "bold")
 FONT_LABEL = ("Segoe UI", 9)
 FONT_CONSOLE = ("Consolas", 9)
 
-# Estilo base de botones integrados en fondo oscuro
 STYLE_BTN_BASE = {
     "font": ("Segoe UI", 9, "bold"),
     "relief": "flat",
@@ -48,7 +44,6 @@ camara_activa = False
 capture = None
 imagen_base_gray = None
 
-# Variables para el recorte interactivo con el ratón
 roi_start = None
 roi_end = None
 drawing_roi = False
@@ -56,7 +51,7 @@ drawing_roi = False
 # --- VENTANA PRINCIPAL ---
 ventana = tk.Tk()
 ventana.geometry("1480x780")
-ventana.title("Detector de Objetos - Control Visión")
+ventana.title("Detector de Objetos - Control Visión Optimizado")
 ventana.configure(bg=BG)
 ventana.resizable(False, False)
 
@@ -66,7 +61,7 @@ def mostrar(label, img_np, bgr=False, w=300, h=240):
         return
     if bgr:
         img_np = cv2.cvtColor(img_np, cv2.COLOR_BGR2RGB)
-    img_np = cv2.resize(img_np, (w, h))
+    img_np = cv2.resize(img_np, (w, h), interpolation=cv2.INTER_NEAREST)
     pil_img = Image.fromarray(img_np)
     tk_img = ImageTk.PhotoImage(image=pil_img)
     label.configure(image=tk_img)
@@ -82,9 +77,7 @@ def escribir(caja, texto):
 
 def archivo():
     global imagen_base_gray, roi_start, roi_end
-    path = filedialog.askopenfilename(
-        filetypes=[("Imágenes", "*.jpg *.jpeg *.png")]
-    )
+    path = filedialog.askopenfilename(filetypes=[("Imágenes", "*.jpg *.jpeg *.png")])
     if not path:
         return
     bgr = cv2.imread(path)
@@ -92,7 +85,6 @@ def archivo():
         messagebox.showerror("Error", "No se pudo leer la imagen")
         return
 
-    # Resetear ROI
     roi_start = None
     roi_end = None
 
@@ -130,7 +122,7 @@ def alternar_camara(event=None):
 
 
 def tomar_foto(event=None):
-    global imagen_base_gray, roi_start, roi_end, camara_activa, capture
+    global imagen_base_gray, roi_start, roi_end, camara_activa
     if capture is None or not capture.isOpened():
         if event is None:
             messagebox.showwarning("Aviso", "Primero activa la cámara")
@@ -140,11 +132,9 @@ def tomar_foto(event=None):
         messagebox.showerror("Error", "No se pudo capturar el fotograma")
         return
 
-    # Detener cámara en vivo
     camara_activa = False
     BCamara.configure(text="Cámara (X)", bg=BTN_BLUE)
 
-    # Resetear ROI
     roi_start = None
     roi_end = None
 
@@ -182,7 +172,6 @@ def terminar_seleccion(event):
         return
     drawing_roi = False
     recortar_imagen()
-
     if imagen_base_gray is not None:
         mostrar(LImagen, imagen_base_gray)
 
@@ -271,9 +260,7 @@ def guardar_patron():
 
 
 def obtener_hu(imagen_bin):
-    cnts, _ = cv2.findContours(
-        imagen_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-    )
+    cnts, _ = cv2.findContours(imagen_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not cnts:
         return None
     cnt = max(cnts, key=cv2.contourArea)
@@ -281,19 +268,17 @@ def obtener_hu(imagen_bin):
     if moments["m00"] == 0:
         return None
     hu = cv2.HuMoments(moments).flatten()
-    return [
-        -copysign(1.0, v) * log10(abs(v)) if v != 0 else 0.0 for v in hu
-    ]
+    return [-copysign(1.0, v) * log10(abs(v)) if v != 0 else 0.0 for v in hu]
 
 
 def contorno_mayor(imagen_bin):
-    cnts, _ = cv2.findContours(
-        imagen_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-    )
+    cnts, _ = cv2.findContours(imagen_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     return max(cnts, key=cv2.contourArea) if cnts else None
 
 
 def rotar_template(template, angulo):
+    if angulo == 0:
+        return template
     h, w = template.shape[:2]
     cx, cy = w // 2, h // 2
     M = cv2.getRotationMatrix2D((cx, cy), angulo, 1.0)
@@ -303,12 +288,8 @@ def rotar_template(template, angulo):
     M[0, 2] += (new_w / 2) - cx
     M[1, 2] += (new_h / 2) - cy
     return cv2.warpAffine(
-        template,
-        M,
-        (new_w, new_h),
-        flags=cv2.INTER_NEAREST,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=0,
+        template, M, (new_w, new_h),
+        flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0
     )
 
 
@@ -317,13 +298,9 @@ def comparar_todo():
         messagebox.showwarning("Aviso", "Primero carga o captura una imagen")
         return
 
-    archivos = [
-        f
-        for f in os.listdir(CARPETA_PATRONES)
-        if f.lower().endswith((".png", ".jpg", ".jpeg"))
-    ]
+    archivos = [f for f in os.listdir(CARPETA_PATRONES) if f.lower().endswith((".png", ".jpg", ".jpeg"))]
     if not archivos:
-        messagebox.showwarning("Aviso", "No hay patrones guardados")
+        messagebox.showwarning("Aviso", "No hay patrones guardados en la carpeta")
         return
 
     img_evaluar = recortar_imagen()
@@ -332,6 +309,8 @@ def comparar_todo():
 
     umb = int(SGray.get())
     paso = max(1, int(SAngulo.get()))
+    
+    # 1. Binarizar la imagen recortada para la evaluación actual
     _, img_bin = cv2.threshold(img_evaluar, umb, 255, cv2.THRESH_BINARY)
     ih, iw = img_bin.shape[:2]
 
@@ -341,51 +320,59 @@ def comparar_todo():
     res_tm, res_shapes, res_hu = [], [], []
     mejor_tm_val = -1.0
     mejor_patron_img = None
+    nombre_mas_parecido = ""
 
+    # 2. Iterar sobre cada patrón umbralizado guardado
     for archivo_patron in archivos:
         path = os.path.join(CARPETA_PATRONES, archivo_patron)
         patron = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
         if patron is None:
             continue
-        nombre = os.path.splitext(archivo_patron)[0].replace("_", "")
+
+        # Asegurar binarización limpia del patrón cargado
+        _, patron_bin = cv2.threshold(patron, 127, 255, cv2.THRESH_BINARY)
+        nombre = os.path.splitext(archivo_patron)[0]
 
         best_v = -1.0
 
-        for angulo in range(0, 360, paso):
-            rot = rotar_template(patron, angulo)
-            th, tw = rot.shape[:2]
+        # Comparar normal y versión invertida para tolerar fondos blanco/negro
+        for p_eval in (patron_bin, cv2.bitwise_not(patron_bin)):
+            for angulo in range(0, 360, paso):
+                rot = rotar_template(p_eval, angulo)
+                th, tw = rot.shape[:2]
 
-            # Redimensionar la plantilla si es más grande que la imagen evaluada
-            if th > ih or tw > iw:
-                scale = min(ih / float(th), iw / float(tw)) * 0.95
-                if scale <= 0:
-                    continue
-                rot = cv2.resize(rot, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
+                # Búsqueda multiescala
+                for scale in (0.7, 0.85, 1.0, 1.15):
+                    nw, nh = int(tw * scale), int(th * scale)
 
-            r = cv2.matchTemplate(img_bin, rot, cv2.TM_CCOEFF_NORMED)
-            _, v, _, _ = cv2.minMaxLoc(r)
-            if v > best_v:
-                best_v = v
+                    if nh >= ih or nw >= iw or nh < 10 or nw < 10:
+                        continue
+
+                    rot_resized = cv2.resize(rot, (nw, nh), interpolation=cv2.INTER_NEAREST)
+                    r = cv2.matchTemplate(img_bin, rot_resized, cv2.TM_CCOEFF_NORMED)
+                    _, v, _, _ = cv2.minMaxLoc(r)
+
+                    if v > best_v:
+                        best_v = v
 
         sim = best_v * 100 if best_v >= 0 else 0.0
         res_tm.append((nombre, sim))
 
-        # Guardar la imagen original del patrón con la mejor coincidencia
         if best_v > mejor_tm_val:
             mejor_tm_val = best_v
-            mejor_patron_img = patron.copy()
+            mejor_patron_img = patron_bin.copy()
+            nombre_mas_parecido = nombre
 
-        cnt_p = contorno_mayor(patron)
+        # Comparación suplementaria de formas (matchShapes y Hu)
+        cnt_p = contorno_mayor(patron_bin)
         score = (
-            cv2.matchShapes(
-                cnt_actual, cnt_p, cv2.CONTOURS_MATCH_I2, 0
-            )
+            cv2.matchShapes(cnt_actual, cnt_p, cv2.CONTOURS_MATCH_I2, 0)
             if cnt_actual is not None and cnt_p is not None
             else float("inf")
         )
         res_shapes.append((nombre, score))
 
-        hu_p = obtener_hu(patron)
+        hu_p = obtener_hu(patron_bin)
         dist = (
             float(np.linalg.norm(np.array(hu_actual) - np.array(hu_p)))
             if hu_actual and hu_p
@@ -393,62 +380,45 @@ def comparar_todo():
         )
         res_hu.append((nombre, dist))
 
+    # Ordenar resultados de mayor a menor coincidencia
     res_tm.sort(key=lambda x: x[1], reverse=True)
     res_shapes.sort(key=lambda x: x[1])
     res_hu.sort(key=lambda x: x[1])
 
-    # Mostrar la imagen del patrón detectado
+    # 3. Mostrar la imagen umbralizada que MÁS SE PARECE
     if mejor_patron_img is not None:
         mostrar(LImagenResultado, mejor_patron_img, w=300, h=220)
 
-    txt = f"{'Patrón':<20} {'Similitud':>10}\n" + "─" * 32 + "\n"
+    # 4. Imprimir resultados en las consolas inferiores indicando la más parecida
+    txt = f"{'Patrón':<18} {'Similitud':>10}\n" + "─" * 32 + "\n"
     for nom, sim in res_tm:
-        marca = " ◀" if res_tm and nom == res_tm[0][0] else ""
-        txt += f"{nom:<20} {sim:>8.2f}%{marca}\n"
+        marca = " ◀ (MÁS PARECIDO)" if nom == nombre_mas_parecido else ""
+        txt += f"{nom:<18} {sim:>8.2f}%{marca}\n"
     escribir(CajaTemplate, txt)
 
-    txt = f"{'Patrón':<20} {'Diferencia':>10}\n" + "─" * 32 + "\n"
+    txt = f"{'Patrón':<18} {'Diferencia':>10}\n" + "─" * 32 + "\n"
     for nom, sc in res_shapes:
         marca = " ◀" if res_shapes and nom == res_shapes[0][0] else ""
-        txt += f"{nom:<20} {sc:>10.5f}{marca}\n"
+        txt += f"{nom:<18} {sc:>10.5f}{marca}\n"
     escribir(CajaShapes, txt)
 
-    txt = f"{'Patrón':<18} {'Dist':>6}  Calidad\n" + "─" * 38 + "\n"
+    txt = f"{'Patrón':<16} {'Dist':>6}  Calidad\n" + "─" * 38 + "\n"
     for nom, d in res_hu:
         marca = " ◀" if res_hu and nom == res_hu[0][0] else ""
-        cal = (
-            "sin forma"
-            if d == float("inf")
-            else (
-                "muy similar"
-                if d < 0.5
-                else ("parecido" if d < 1.5 else "diferente")
-            )
-        )
-        txt += f"{nom:<18} {d:>6.3f}  {cal}{marca}\n"
+        cal = "sin forma" if d == float("inf") else ("muy similar" if d < 0.5 else ("parecido" if d < 1.5 else "diferente"))
+        txt += f"{nom:<16} {d:>6.3f}  {cal}{marca}\n"
     escribir(CajaHu, txt)
 
 
 def crear_scale(parent, label_text, from_val, to_val, command=None, orient="horizontal"):
     return tk.Scale(
-        parent,
-        from_=from_val,
-        to=to_val,
-        orient=orient,
-        label=label_text,
-        bg=PANEL,
-        fg=TEXT_MAIN,
-        activebackground=ACCENT,
-        troughcolor="#0f172a",
-        highlightthickness=0,
-        bd=0,
-        font=FONT_LABEL,
-        command=command,
+        parent, from_=from_val, to=to_val, orient=orient, label=label_text,
+        bg=PANEL, fg=TEXT_MAIN, activebackground=ACCENT, troughcolor="#0f172a",
+        highlightthickness=0, bd=0, font=FONT_LABEL, command=command,
     )
 
 top_frame = tk.Frame(ventana, bg=BG)
 top_frame.pack(fill="x", padx=12, pady=10)
-
 
 F0 = tk.LabelFrame(top_frame, text=" 1. Captura y Selección ", bg=PANEL, fg=TEXT_MUTED, font=FONT_TITLE, bd=1, relief="solid")
 F0.pack(side="left", expand=True, fill="both", padx=4)
@@ -479,8 +449,7 @@ BCamara.pack(side="left", padx=3)
 BCapturar = tk.Button(FBotones, text="Foto (Z)", command=tomar_foto, bg="#059669", fg=TEXT_MAIN, **STYLE_BTN_BASE)
 BCapturar.pack(side="left", padx=3)
 
-
-# PANEL F1: Recorte
+# PANEL F1
 F1 = tk.LabelFrame(top_frame, text=" 2. Área Seleccionada ", bg=PANEL, fg=TEXT_MUTED, font=FONT_TITLE, bd=1, relief="solid")
 F1.pack(side="left", expand=True, fill="both", padx=4)
 
@@ -498,8 +467,7 @@ SAngulo = crear_scale(F1, "Paso Angular Busqueda (°)", 1, 90)
 SAngulo.set(5)
 SAngulo.pack(fill="x", padx=8)
 
-
-# PANEL F2: Umbralización
+# PANEL F2
 F2 = tk.LabelFrame(top_frame, text=" 3. Umbralización y Guardado ", bg=PANEL, fg=TEXT_MUTED, font=FONT_TITLE, bd=1, relief="solid")
 F2.pack(side="left", expand=True, fill="both", padx=4)
 
@@ -516,18 +484,14 @@ BUmbral.pack(fill="x", padx=8, pady=4)
 lbl_nombre = tk.Label(F2, text="Nombre del Patrón:", bg=PANEL, fg=TEXT_MUTED, font=FONT_LABEL)
 lbl_nombre.pack(anchor="w", padx=8, pady=(4, 0))
 
-EntradaNombre = tk.Entry(
-    F2, bg="#0f172a", fg=TEXT_MAIN, font=FONT_CONSOLE, insertbackground=TEXT_MAIN,
-    bd=1, relief="solid", highlightthickness=0
-)
+EntradaNombre = tk.Entry(F2, bg="#0f172a", fg=TEXT_MAIN, font=FONT_CONSOLE, insertbackground=TEXT_MAIN, bd=1, relief="solid", highlightthickness=0)
 EntradaNombre.insert(0, "patron")
 EntradaNombre.pack(fill="x", padx=8, pady=4)
 
 BGuardar = tk.Button(F2, text="Guardar Patrón", command=guardar_patron, bg=BTN_GREEN, fg=TEXT_MAIN, **STYLE_BTN_BASE)
 BGuardar.pack(fill="x", padx=8, pady=6)
 
-
-# PANEL F3: Coincidencia
+# PANEL F3
 F3 = tk.LabelFrame(top_frame, text=" 4. Resultado Detección ", bg=PANEL, fg=TEXT_MUTED, font=FONT_TITLE, bd=1, relief="solid")
 F3.pack(side="left", expand=True, fill="both", padx=4)
 
@@ -538,13 +502,10 @@ FContenedor4.pack(padx=8, pady=6)
 LImagenResultado = tk.Label(FContenedor4, bg="#0f172a")
 LImagenResultado.pack(expand=True, fill="both")
 
-BCompararCamara = tk.Button(
-    F3, text="Comparar Todo", command=comparar_todo, bg=BTN_PURPLE, fg=TEXT_MAIN, **STYLE_BTN_BASE
-)
+BCompararCamara = tk.Button(F3, text="Comparar Todo", command=comparar_todo, bg=BTN_PURPLE, fg=TEXT_MAIN, **STYLE_BTN_BASE)
 BCompararCamara.pack(fill="x", padx=8, pady=12)
 
-
-# --- CONTENEDOR INFERIOR PARA CAJAS DE RESULTADOS ---
+# CAJAS RESULTADOS
 bottom_frame = tk.Frame(ventana, bg=BG)
 bottom_frame.pack(fill="both", expand=True, padx=12, pady=(0, 10))
 
@@ -560,10 +521,7 @@ def crear_caja_resultado(parent, col, titulo, color_header):
     lbl = tk.Label(frame_box, text=titulo, bg=color_header, fg=TEXT_MAIN, font=FONT_TITLE, pady=3)
     lbl.pack(fill="x")
 
-    text_area = tk.Text(
-        frame_box, bg="#0f172a", fg="#38bdf8", font=FONT_CONSOLE,
-        state="disabled", relief="flat", bd=0, highlightthickness=0, padx=8, pady=8
-    )
+    text_area = tk.Text(frame_box, bg="#0f172a", fg="#38bdf8", font=FONT_CONSOLE, state="disabled", relief="flat", bd=0, highlightthickness=0, padx=8, pady=8)
     text_area.pack(fill="both", expand=True)
     return text_area
 
@@ -572,8 +530,7 @@ CajaTemplate = crear_caja_resultado(bottom_frame, 0, "Template Matching", "#b453
 CajaShapes = crear_caja_resultado(bottom_frame, 1, "matchShapes", "#047857")
 CajaHu = crear_caja_resultado(bottom_frame, 2, "Momentos Hu", "#be123c")
 
-
-# --- ATAJOS DE TECLADO ---
+# ATAJOS TECLADO
 ventana.bind("<x>", alternar_camara)
 ventana.bind("<X>", alternar_camara)
 ventana.bind("<z>", tomar_foto)
