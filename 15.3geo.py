@@ -62,6 +62,8 @@ ventana.resizable(False, False)
 
 
 def mostrar(label, img_np, bgr=False, w=300, h=240):
+    if img_np is None or img_np.size == 0:
+        return
     if bgr:
         img_np = cv2.cvtColor(img_np, cv2.COLOR_BGR2RGB)
     img_np = cv2.resize(img_np, (w, h))
@@ -128,7 +130,7 @@ def alternar_camara(event=None):
 
 
 def tomar_foto(event=None):
-    global imagen_base_gray, roi_start, roi_end, camara_activa
+    global imagen_base_gray, roi_start, roi_end, camara_activa, capture
     if capture is None or not capture.isOpened():
         if event is None:
             messagebox.showwarning("Aviso", "Primero activa la cámara")
@@ -138,18 +140,15 @@ def tomar_foto(event=None):
         messagebox.showerror("Error", "No se pudo capturar el fotograma")
         return
 
-    # 1. Detener el bucle en vivo de la cámara
+    # Detener cámara en vivo
     camara_activa = False
-
-    # 2. Actualizar el estado del botón a su estado inicial
     BCamara.configure(text="Cámara (X)", bg=BTN_BLUE)
 
     # Resetear ROI
     roi_start = None
     roi_end = None
 
-    frame_resized = imutils.resize(imutils.resize(frame, width=300), height=240)
-    imagen_base_gray = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2GRAY)
+    imagen_base_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     mostrar(LImagen, imagen_base_gray)
     recortar_imagen()
 
@@ -168,11 +167,9 @@ def mover_seleccion(event):
     global roi_end
     if not drawing_roi or imagen_base_gray is None:
         return
-    # 1. Obtener las dimensiones reales del Label dinámicamente
-    w_label = LImagen.winfo_width()
-    h_label = LImagen.winfo_height()
-    
-    # 2. Limitar según el tamaño real renderizado
+    w_label = max(1, LImagen.winfo_width())
+    h_label = max(1, LImagen.winfo_height())
+
     x = max(0, min(event.x, w_label))
     y = max(0, min(event.y, h_label))
     roi_end = (x, y)
@@ -185,7 +182,7 @@ def terminar_seleccion(event):
         return
     drawing_roi = False
     recortar_imagen()
-    
+
     if imagen_base_gray is not None:
         mostrar(LImagen, imagen_base_gray)
 
@@ -193,20 +190,21 @@ def terminar_seleccion(event):
 def redibujar_seleccion():
     if imagen_base_gray is None or roi_start is None or roi_end is None:
         return
-    
+
     h_real, w_real = imagen_base_gray.shape[:2]
     vis = cv2.cvtColor(imagen_base_gray, cv2.COLOR_GRAY2BGR)
-    
+
     scale_x = w_real / 300.0
     scale_y = h_real / 240.0
-    
+
     x1 = int(roi_start[0] * scale_x)
     y1 = int(roi_start[1] * scale_y)
     x2 = int(roi_end[0] * scale_x)
     y2 = int(roi_end[1] * scale_y)
-    
+
     cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 0), 2)
     mostrar(LImagen, vis, bgr=True, w=300, h=240)
+
 
 def recortar_imagen(event=None):
     if imagen_base_gray is None:
@@ -218,7 +216,7 @@ def recortar_imagen(event=None):
         recortada = imagen_base_gray.copy()
     else:
         h_real, w_real = imagen_base_gray.shape[:2]
-        
+
         scale_x = w_real / 300.0
         scale_y = h_real / 240.0
 
@@ -230,7 +228,6 @@ def recortar_imagen(event=None):
         y1 = int(y1_ui * scale_y)
         y2 = int(y2_ui * scale_y)
 
-        # Delimitar estrictamente dentro de la matriz
         x1 = max(0, min(w_real - 1, x1))
         x2 = max(0, min(w_real, x2))
         y1 = max(0, min(h_real - 1, y1))
@@ -241,7 +238,6 @@ def recortar_imagen(event=None):
         else:
             recortada = imagen_base_gray[y1:y2, x1:x2]
 
-    # Mostrar dentro de los 300x240 del contenedor
     mostrar(LImagen2, recortada, w=300, h=240)
     return recortada
 
@@ -330,9 +326,13 @@ def comparar_todo():
         messagebox.showwarning("Aviso", "No hay patrones guardados")
         return
 
+    img_evaluar = recortar_imagen()
+    if img_evaluar is None:
+        return
+
     umb = int(SGray.get())
     paso = max(1, int(SAngulo.get()))
-    _, img_bin = cv2.threshold(imagen_base_gray, umb, 255, cv2.THRESH_BINARY)
+    _, img_bin = cv2.threshold(img_evaluar, umb, 255, cv2.THRESH_BINARY)
     ih, iw = img_bin.shape[:2]
 
     cnt_actual = contorno_mayor(img_bin)
@@ -340,7 +340,7 @@ def comparar_todo():
 
     res_tm, res_shapes, res_hu = [], [], []
     mejor_tm_val = -1.0
-    mejor_tm_img = None
+    mejor_patron_img = None
 
     for archivo_patron in archivos:
         path = os.path.join(CARPETA_PATRONES, archivo_patron)
@@ -349,35 +349,31 @@ def comparar_todo():
             continue
         nombre = os.path.splitext(archivo_patron)[0].replace("_", "")
 
-        best_v, best_tmpl, best_loc = -1.0, None, (0, 0)
-        patron_inv = cv2.bitwise_not(patron)
+        best_v = -1.0
 
         for angulo in range(0, 360, paso):
             rot = rotar_template(patron, angulo)
             th, tw = rot.shape[:2]
+
+            # Redimensionar la plantilla si es más grande que la imagen evaluada
             if th > ih or tw > iw:
-                continue
+                scale = min(ih / float(th), iw / float(tw)) * 0.95
+                if scale <= 0:
+                    continue
+                rot = cv2.resize(rot, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
 
-            rot_inv = rotar_template(patron_inv, angulo)
-
-            for t in (rot, rot_inv):
-                r = cv2.matchTemplate(img_bin, t, cv2.TM_CCOEFF_NORMED)
-                _, v, _, loc = cv2.minMaxLoc(r)
-                if v > best_v:
-                    best_v, best_tmpl, best_loc = v, t, loc
+            r = cv2.matchTemplate(img_bin, rot, cv2.TM_CCOEFF_NORMED)
+            _, v, _, _ = cv2.minMaxLoc(r)
+            if v > best_v:
+                best_v = v
 
         sim = best_v * 100 if best_v >= 0 else 0.0
         res_tm.append((nombre, sim))
 
-        if best_v > mejor_tm_val and best_tmpl is not None:
+        # Guardar la imagen original del patrón con la mejor coincidencia
+        if best_v > mejor_tm_val:
             mejor_tm_val = best_v
-            th2, tw2 = best_tmpl.shape[:2]
-            mx, my = best_loc
-            vis = cv2.cvtColor(img_bin, cv2.COLOR_GRAY2RGB)
-            cv2.rectangle(
-                vis, (mx, my), (mx + tw2, my + th2), (255, 215, 0), 2
-            )
-            mejor_tm_img = vis
+            mejor_patron_img = patron.copy()
 
         cnt_p = contorno_mayor(patron)
         score = (
@@ -401,24 +397,25 @@ def comparar_todo():
     res_shapes.sort(key=lambda x: x[1])
     res_hu.sort(key=lambda x: x[1])
 
-    if mejor_tm_img is not None:
-        mostrar(LImagenResultado, mejor_tm_img, w=300, h=220)
+    # Mostrar la imagen del patrón detectado
+    if mejor_patron_img is not None:
+        mostrar(LImagenResultado, mejor_patron_img, w=300, h=220)
 
     txt = f"{'Patrón':<20} {'Similitud':>10}\n" + "─" * 32 + "\n"
     for nom, sim in res_tm:
-        marca = " ◀" if nom == res_tm[0][0] else ""
+        marca = " ◀" if res_tm and nom == res_tm[0][0] else ""
         txt += f"{nom:<20} {sim:>8.2f}%{marca}\n"
     escribir(CajaTemplate, txt)
 
     txt = f"{'Patrón':<20} {'Diferencia':>10}\n" + "─" * 32 + "\n"
     for nom, sc in res_shapes:
-        marca = " ◀" if nom == res_shapes[0][0] else ""
+        marca = " ◀" if res_shapes and nom == res_shapes[0][0] else ""
         txt += f"{nom:<20} {sc:>10.5f}{marca}\n"
     escribir(CajaShapes, txt)
 
     txt = f"{'Patrón':<18} {'Dist':>6}  Calidad\n" + "─" * 38 + "\n"
     for nom, d in res_hu:
-        marca = " ◀" if nom == res_hu[0][0] else ""
+        marca = " ◀" if res_hu and nom == res_hu[0][0] else ""
         cal = (
             "sin forma"
             if d == float("inf")
@@ -466,7 +463,6 @@ FContenedor.pack(padx=6, pady=4)
 LImagen = tk.Label(FContenedor, bg="#0f172a", cursor="crosshair")
 LImagen.pack(expand=True, fill="both")
 
-# Eventos de ratón vinculados a LImagen para el recuadro dinámico
 LImagen.bind("<ButtonPress-1>", empezar_seleccion)
 LImagen.bind("<B1-Motion>", mover_seleccion)
 LImagen.bind("<ButtonRelease-1>", terminar_seleccion)
@@ -498,7 +494,7 @@ LImagen2.pack(expand=True, fill="both")
 SGray = crear_scale(F1, "Umbral Binarización", 0, 255)
 SGray.pack(fill="x", padx=8)
 
-SAngulo = crear_scale(F1, "Paso Angular Busqueda (°)", 0, 90)
+SAngulo = crear_scale(F1, "Paso Angular Busqueda (°)", 1, 90)
 SAngulo.set(5)
 SAngulo.pack(fill="x", padx=8)
 
@@ -543,7 +539,7 @@ LImagenResultado = tk.Label(FContenedor4, bg="#0f172a")
 LImagenResultado.pack(expand=True, fill="both")
 
 BCompararCamara = tk.Button(
-    F3, text= "Comparar Todo", command=comparar_todo, bg=BTN_PURPLE, fg=TEXT_MAIN, **STYLE_BTN_BASE
+    F3, text="Comparar Todo", command=comparar_todo, bg=BTN_PURPLE, fg=TEXT_MAIN, **STYLE_BTN_BASE
 )
 BCompararCamara.pack(fill="x", padx=8, pady=12)
 
