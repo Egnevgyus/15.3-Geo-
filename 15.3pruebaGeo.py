@@ -41,6 +41,7 @@ STYLE_BTN_BASE = {
 UMBRAL_ACEPTACION = 80.0     # por debajo de esto el resultado se marca como "baja confianza"
 MARGEN_AMBIGUO = 5.0         # si 1° y 2° puestos difieren menos de esto, se marca como ambiguo
 UMBRALES_BARRIDO = tuple(range(40, 241, 10))   # umbrales probados si el resultado no es confiable
+BARRIDO_AUTOMATICO = True    # False = usar SOLO el umbral del deslizador (sin probar otros umbrales)
 CORTE_BARRIDO = 90.0         # el barrido se detiene si logra un puntaje >= a esto (y con ventaja)
 
 USAR_MARCADORES = True       # buscar un marcador cuadrado (con dibujo interno) y compararlo
@@ -320,7 +321,7 @@ def guardar_patron():
 #      guardado, probando sus 4 giros de 90°. Puntaje = correlación (0-100%).
 #   3) Si no hay marcador cuadrado, compara la FORMA de la pieza (recorte justo, escala y giro libres).
 #   4) Si el resultado no es confiable con el umbral del deslizador, prueba varios umbrales
-#      automáticamente y se queda con el mejor (y deja el deslizador en ese valor).
+#      automáticamente y se queda con el mejor, SIN mover el deslizador (el valor que tú pusiste se respeta).
 
 # ---------------------------------------------------------------------------
 # UTILIDADES COMUNES
@@ -786,17 +787,16 @@ def identificar_y_comparar(silencioso=False):
     umbral_usado = None
     barrido_intentado = False
     mejor_actual = resultados[0][1] if resultados else 0.0
-    if mejor_actual < UMBRAL_ACEPTACION:
+    if BARRIDO_AUTOMATICO and mejor_actual < UMBRAL_ACEPTACION:
         gris_recorte = recortar_imagen()
         if gris_recorte is not None:
             barrido_intentado = True
             barrido = comparar_con_barrido(gris_recorte, patrones)
             if barrido is not None and barrido[1][0][1] > mejor_actual:
                 umbral_usado, resultados, info = barrido
-                if resultados[0][1] >= UMBRAL_ACEPTACION:
-                    SGray.set(umbral_usado)      # la zona 3 pasa a mostrar el umbral que funcionó
-                else:
-                    umbral_usado = None          # no fue mejor en la práctica: se informa como fallido
+                if resultados[0][1] < UMBRAL_ACEPTACION:
+                    umbral_usado = None          # tampoco fue una coincidencia confiable: se informa como fallido
+            # OJO: el deslizador NO se toca; queda exactamente en el valor que puso el usuario
 
     x1, y1, x2, y2 = roi_coords_real if roi_coords_real else (0, 0, 0, 0)
     txt_pos = "INFORMACIÓN DE DETECCIÓN:\n"
@@ -852,7 +852,9 @@ def identificar_y_comparar(silencioso=False):
     elif info.get("metodo") == "forma":
         txt_pos += "Método: comparación por forma (no se halló un marcador cuadrado)\n"
     if umbral_usado is not None:
-        txt_pos += f"Umbral usado: {umbral_usado} (barrido automático)\n"
+        val_slider = int(SGray.get())
+        txt_slider = "Otsu" if val_slider == 0 else str(val_slider)
+        txt_pos += f"Umbral usado: {umbral_usado} (barrido automático; el deslizador sigue en {txt_slider})\n"
     elif barrido_intentado:
         txt_pos += "Se probaron varios umbrales automáticamente; ninguno dio una coincidencia confiable.\n"
     txt_pos += f"Zona de Recorte: ({x1}, {y1}) a ({x2}, {y2})\n"
