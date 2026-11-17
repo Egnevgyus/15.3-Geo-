@@ -5,10 +5,6 @@ from functools import lru_cache
 import cv2
 import numpy as np
 
-# =====================================================================
-#  ESTILO VISUAL  (solo apariencia: no afecta la deteccion)
-# =====================================================================
-# Colores en BGR
 VERDE = (153, 211, 52)
 AMARILLO = (36, 191, 251)
 NARANJA = (60, 146, 251)
@@ -23,7 +19,6 @@ COLORES_SEGMENTOS = (VERDE, AMARILLO, NARANJA, ROJO)
 
 
 def mezclar(a, b, k):
-    """Mezcla dos colores: k=0 -> a, k=1 -> b."""
     return tuple(int(a[i] * (1 - k) + b[i] * k) for i in range(3))
 
 
@@ -33,7 +28,6 @@ def oscurecer(c, k):
 
 @lru_cache(maxsize=32)
 def _mascara(h, w, r):
-    """Mascara suave (0..1) de un rectangulo con esquinas redondeadas."""
     r = max(1, min(r, h // 2, w // 2))
     m = np.zeros((h, w), np.uint8)
     cv2.rectangle(m, (r, 0), (w - 1 - r, h - 1), 255, -1)
@@ -45,7 +39,6 @@ def _mascara(h, w, r):
 
 @lru_cache(maxsize=32)
 def _borde(h, w, r):
-    """Contorno fino de 1 px del rectangulo redondeado."""
     externo = _mascara(h, w, r)
     interno = np.zeros_like(externo)
     if h > 4 and w > 4:
@@ -54,7 +47,6 @@ def _borde(h, w, r):
 
 
 def panel_vidrio(img, x, y, w, h, r, tinte=PANEL, alpha=0.60, borde=0.16):
-    """Panel translucido con el fondo desenfocado (efecto vidrio esmerilado)."""
     H, W = img.shape[:2]
     x, y = max(0, x), max(0, y)
     w, h = min(w, W - x), min(h, H - y)
@@ -77,7 +69,6 @@ def ancho_texto(s, escala, grosor=1, espaciado=0):
 
 
 def texto(img, s, org, escala, color, grosor=1, espaciado=0, ancla="izq", sombra=False):
-    """Texto suavizado, con sombra opcional, espaciado de letras y anclaje."""
     x, y = org
     tw = ancho_texto(s, escala, grosor, espaciado)
     if ancla == "der":
@@ -101,7 +92,6 @@ def texto(img, s, org, escala, color, grosor=1, espaciado=0, ancla="izq", sombra
 
 
 def barra(img, x, y, w, h, color):
-    """Barra con extremos redondeados."""
     r = h // 2
     if w <= h:
         cv2.circle(img, (x + r, y + r), r, color, -1, AA)
@@ -112,7 +102,6 @@ def barra(img, x, y, w, h, color):
 
 
 def pos_gauge(v):
-    """Posicion 0..4 en el indicador: cada tramo (normal/leve/fuerte/terremoto) mide lo mismo."""
     if v < 1.5:
         return v / 1.5
     if v < 5.0:
@@ -124,7 +113,6 @@ def pos_gauge(v):
 
 @lru_cache(maxsize=4)
 def _vineta(h, w):
-    """Intensidad (0..255) de un viñeteo: 0 en el centro, 255 en las esquinas."""
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
     d = np.sqrt(((xx - w / 2) / (w / 2)) ** 2 + ((yy - h / 2) / (h / 2)) ** 2)
     a = np.clip((d - 0.50) / 0.90, 0, 1) ** 1.5
@@ -132,7 +120,6 @@ def _vineta(h, w):
 
 
 def vineta_alerta(frame, color, fuerza):
-    """Resplandor rojo en los bordes de la imagen (rapido, solo operaciones uint8)."""
     h, w = frame.shape[:2]
     a = cv2.convertScaleAbs(_vineta(h, w), alpha=fuerza)
     inv = cv2.cvtColor(255 - a, cv2.COLOR_GRAY2BGR)
@@ -142,7 +129,6 @@ def vineta_alerta(frame, color, fuerza):
 
 
 def dibujar_hud(frame, mag, estado, nivel, color, gauge_t, t, mostrar_ayuda=True):
-    """Dibuja toda la interfaz sobre `frame`. nivel: 0 normal, 1 leve, 2 fuerte, 3 terremoto."""
     H, W = frame.shape[:2]
     s = max(0.6, W / 960.0)
 
@@ -152,26 +138,22 @@ def dibujar_hud(frame, mag, estado, nivel, color, gauge_t, t, mostrar_ayuda=True
     pulso = 0.5 + 0.5 * math.sin(t * 2 * math.pi * (1.6 if nivel == 3 else 0.8))
     m = S(24)
 
-    # ---------- efectos de alerta sobre la imagen ----------
     if nivel == 3:
         vineta_alerta(frame, ROJO, 0.55 + 0.45 * pulso)
         borde_col = mezclar(oscurecer(ROJO, 0.55), ROJO, pulso)
         cv2.rectangle(frame, (0, 0), (W - 1, H - 1), borde_col, S(6))
 
-    # ---------- panel principal ----------
     pw, ph = S(400), S(188)
     panel_vidrio(frame, m, m, pw, ph, S(18))
     x0 = m + S(24)
 
     texto(frame, "MONITOR SISMICO", (x0, m + S(34)), 0.5 * s, GRIS, 1, espaciado=S(2), sombra=False)
 
-    # punto "en vivo" que late
     cx, cy = m + pw - S(28), m + S(29)
     radio_halo = S(5) + int(S(6) * pulso)
     cv2.circle(frame, (cx, cy), radio_halo, oscurecer(color, 0.25 + 0.5 * (1 - pulso)), 1, AA)
     cv2.circle(frame, (cx, cy), S(5), color, -1, AA)
 
-    # valor grande con resplandor
     valor = f"{mag:.2f}"
     esc_v, gr_v = 2.4 * s, max(2, S(3))
     base_y = m + S(104)
@@ -187,7 +169,6 @@ def dibujar_hud(frame, mag, estado, nivel, color, gauge_t, t, mostrar_ayuda=True
 
     texto(frame, "VELOCIDAD ESTRUCTURAL", (x0, m + S(130)), 0.42 * s, GRIS, 1, espaciado=S(2), sombra=False)
 
-    # ---------- indicador (gauge) ----------
     gx0, gy0 = x0, m + S(144)
     ancho_total = pw - 2 * S(24)
     hueco = S(4)
@@ -212,7 +193,6 @@ def dibujar_hud(frame, mag, estado, nivel, color, gauge_t, t, mostrar_ayuda=True
         texto(frame, etiqueta, (mx, gy0 + alto_barra + S(18)), 0.36 * s, oscurecer(GRIS, 0.8), 1,
               ancla=ancla, sombra=False)
 
-    # ---------- insignia de estado ----------
     nombre, _, sub = estado.partition(" - ")
     nombre = nombre.upper()
     esc_n, esc_sub = 0.62 * s, 0.4 * s
@@ -230,14 +210,12 @@ def dibujar_hud(frame, mag, estado, nivel, color, gauge_t, t, mostrar_ayuda=True
         texto(frame, sub, (px + w_n + S(16), by + bh // 2 + S(5)), esc_sub, mezclar(BLANCO, color, 0.35), 1,
               espaciado=S(2), sombra=False)
 
-    # ---------- reloj ----------
     cw, ch = S(150), S(58)
     panel_vidrio(frame, W - m - cw, m, cw, ch, S(14))
     texto(frame, time.strftime("%H:%M:%S"), (W - m - cw + S(18), m + S(30)), 0.8 * s, BLANCO, 1)
     texto(frame, time.strftime("%d/%m/%Y"), (W - m - cw + S(18), m + S(48)), 0.4 * s, GRIS, 1,
           espaciado=S(1), sombra=False)
 
-    # ---------- banner de terremoto ----------
     if nivel == 3:
         bw2, bh2 = S(440), S(64)
         panel_vidrio(frame, (W - bw2) // 2, H - m - bh2, bw2, bh2, S(16),
@@ -248,9 +226,6 @@ def dibujar_hud(frame, mag, estado, nivel, color, gauge_t, t, mostrar_ayuda=True
         texto(frame, "Q  SALIR    P  PUNTOS", (m, H - S(18)), 0.4 * s, oscurecer(GRIS, 0.9), 1, espaciado=S(1), sombra=True)
 
 
-# =====================================================================
-#  DETECCION  (tu codigo original, sin cambios en la logica)
-# =====================================================================
 cap = cv2.VideoCapture(0)
 
 ret, prev_frame = cap.read()
@@ -273,7 +248,6 @@ lk_params = dict(
 p0 = cv2.goodFeaturesToTrack(prev_gray, mask=None, **feature_params)
 smoothed_mag = 0.0
 
-# (solo visual)
 gauge_t = 0.0
 mostrar_puntos = True
 
@@ -327,7 +301,6 @@ while cap.isOpened():
     color = AMARILLO
     nivel = 1
 
-  # (solo visual) el indicador se desliza suavemente hacia el valor real
   gauge_t += (pos_gauge(smoothed_mag) - gauge_t) * 0.25
   dibujar_hud(frame, smoothed_mag, estado, nivel, color, gauge_t, time.time())
 
