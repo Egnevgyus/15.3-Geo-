@@ -1,5 +1,4 @@
 import csv
-import html
 import math
 import os
 import time
@@ -24,7 +23,6 @@ COLORES_SEGMENTOS = (VERDE, AMARILLO, NARANJA, ROJO)
 
 CARPETA_GRABACIONES = "grabaciones_sismos"
 ARCHIVO_REGISTRO_CSV = os.path.join(CARPETA_GRABACIONES, "registro_sismos.csv")
-ARCHIVO_REPORTE_HTML = os.path.join(CARPETA_GRABACIONES, "reporte_sismos.html")
 
 
 def mezclar(a, b, k):
@@ -334,25 +332,35 @@ def nombre_nivel_corto(nivel):
     return {1: "SISMO_LEVE", 2: "SISMO_FUERTE", 3: "TERREMOTO"}.get(nivel, "NORMAL")
 
 
-def descripcion_nivel_csv(nivel):
+def clasificacion_csv(nivel):
     return {
-        1: "Sismo Leve (Alerta Amarilla)",
-        2: "Sismo Fuerte (Alerta Naranja)",
-        3: "Terremoto (Alerta Roja)",
+        1: "Leve",
+        2: "Fuerte",
+        3: "Terremoto",
     }.get(nivel, "Normal")
 
 
 ENCABEZADOS_CSV = [
-    "N° Evento",
+    "Evento",
     "Fecha",
-    "Hora Inicio",
-    "Hora Fin",
-    "Duración (s)",
-    "Clasificación",
-    "Pico Máximo (px)",
-    "Promedio (px)",
+    "Inicio",
+    "Fin",
+    "Duración",
+    "Tipo",
+    "Máximo",
+    "Promedio",
     "Archivo de Video",
 ]
+
+
+def centrar_celdas(valores):
+    """Centra visualmente el texto de cada columna en el ancho estandar de Excel."""
+    anchos_excel = [11, 13, 11, 11, 11, 12, 11, 11, 52]
+    fila_centrada = []
+    for i, val in enumerate(valores):
+        ancho = anchos_excel[i] if i < len(anchos_excel) else len(str(val)) + 4
+        fila_centrada.append(str(val).center(ancho))
+    return fila_centrada
 
 
 def inicializar_carpeta_registro():
@@ -360,227 +368,41 @@ def inicializar_carpeta_registro():
     if not os.path.exists(ARCHIVO_REGISTRO_CSV) or os.path.getsize(ARCHIVO_REGISTRO_CSV) == 0:
         with open(ARCHIVO_REGISTRO_CSV, mode="w", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f, delimiter=";")
-            writer.writerow(ENCABEZADOS_CSV)
+            writer.writerow(["REGISTRO DE MONITOREO SÍSMICO"])
+            writer.writerow([])
+            writer.writerow(centrar_celdas(ENCABEZADOS_CSV))
 
 
-def leer_eventos_csv():
+def obtener_siguiente_num_evento():
     if not os.path.exists(ARCHIVO_REGISTRO_CSV):
-        return []
-    eventos = []
+        return 1
     with open(ARCHIVO_REGISTRO_CSV, mode="r", encoding="utf-8-sig") as f:
-        reader = csv.DictReader(f, delimiter=";")
-        for fila in reader:
-            if fila and fila.get("N° Evento"):
-                eventos.append(fila)
-    return eventos
-
-
-def regenerar_reporte_html():
-    """Genera un panel visual moderno en HTML dentro de la carpeta de grabaciones."""
-    eventos = leer_eventos_csv()
-    total_eventos = len(eventos)
-
-    max_global = 0.0
-    total_terremotos = 0
-    for ev in eventos:
-        try:
-            val_max = float(ev["Pico Máximo (px)"].replace(",", "."))
-            if val_max > max_global:
-                max_global = val_max
-        except (ValueError, KeyError):
-            pass
-        if "Terremoto" in ev.get("Clasificación", ""):
-            total_terremotos += 1
-
-    filas_html = []
-    for ev in reversed(eventos):
-        clasif = ev.get("Clasificación", "")
-        if "Terremoto" in clasif:
-            badge_cls = "badge-rojo"
-            bar_color = "#ef4444"
-        elif "Fuerte" in clasif:
-            badge_cls = "badge-naranja"
-            bar_color = "#fb923c"
-        else:
-            badge_cls = "badge-amarillo"
-            bar_color = "#facc15"
-
-        try:
-            pico_num = float(ev.get("Pico Máximo (px)", "0").replace(",", "."))
-        except ValueError:
-            pico_num = 0.0
-        ancho_barra = min(100, int((pico_num / 30.0) * 100))
-
-        video_file = html.escape(ev.get("Archivo de Video", ""))
-        filas_html.append(f"""
-            <tr>
-                <td class="col-id">{html.escape(ev.get('N° Evento', ''))}</td>
-                <td>{html.escape(ev.get('Fecha', ''))}</td>
-                <td class="mono">{html.escape(ev.get('Hora Inicio', ''))} &rarr; {html.escape(ev.get('Hora Fin', ''))}</td>
-                <td class="mono">{html.escape(ev.get('Duración (s)', ''))} s</td>
-                <td><span class="badge {badge_cls}">{html.escape(clasif)}</span></td>
-                <td>
-                    <div class="metric-wrap">
-                        <span class="mono strong">{pico_num:.2f} px</span>
-                        <div class="bar-bg"><div class="bar-fill" style="width:{ancho_barra}%;background:{bar_color};"></div></div>
-                    </div>
-                </td>
-                <td class="mono">{html.escape(ev.get('Promedio (px)', ''))} px</td>
-                <td><a class="btn-video" href="{video_file}" target="_blank">&#9654; Ver video</a></td>
-            </tr>
-        """)
-
-    cuerpo_tabla = (
-        "\n".join(filas_html)
-        if filas_html
-        else '<tr><td colspan="8" class="empty">Aún no se han registrado movimientos sísmicos.</td></tr>'
-    )
-
-    pagina = f"""<!DOCTYPE html>
-<html lang="es">
-<head>
-<meta charset="UTF-8">
-<title>Reporte de Monitoreo Sísmico</title>
-<style>
-  :root {{
-    --bg: #0b0f17;
-    --card: #131a26;
-    --border: #222d40;
-    --text: #e2e8f0;
-    --muted: #8b9bb4;
-  }}
-  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-  body {{
-    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
-    background: var(--bg);
-    color: var(--text);
-    padding: 36px;
-  }}
-  .container {{ max-width: 1200px; margin: 0 auto; }}
-  header {{
-    display: flex; justify-content: space-between; align-items: flex-end;
-    margin-bottom: 28px; border-bottom: 1px solid var(--border); padding-bottom: 18px;
-  }}
-  h1 {{ font-size: 24px; font-weight: 700; letter-spacing: 0.5px; }}
-  .subtitle {{ color: var(--muted); font-size: 13px; margin-top: 4px; }}
-  .cards {{
-    display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin-bottom: 28px;
-  }}
-  .card {{
-    background: var(--card); border: 1px solid var(--border); border-radius: 14px;
-    padding: 20px 24px;
-  }}
-  .card-label {{ font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); }}
-  .card-value {{ font-size: 30px; font-weight: 700; margin-top: 8px; }}
-  .table-box {{
-    background: var(--card); border: 1px solid var(--border); border-radius: 14px;
-    overflow: hidden; box-shadow: 0 12px 30px rgba(0,0,0,0.35);
-  }}
-  table {{ width: 100%; border-collapse: collapse; font-size: 14px; }}
-  th {{
-    background: #182131; color: var(--muted); font-size: 11px; text-transform: uppercase;
-    letter-spacing: 1px; text-align: left; padding: 14px 16px; border-bottom: 1px solid var(--border);
-  }}
-  td {{ padding: 14px 16px; border-bottom: 1px solid var(--border); vertical-align: middle; }}
-  tr:last-child td {{ border-bottom: none; }}
-  tr:hover td {{ background: rgba(255,255,255,0.02); }}
-  .col-id {{ font-weight: 700; color: #38bdf8; }}
-  .mono {{ font-variant-numeric: tabular-nums; }}
-  .strong {{ font-weight: 700; }}
-  .badge {{
-    display: inline-block; padding: 5px 11px; border-radius: 999px; font-size: 12px; font-weight: 600;
-  }}
-  .badge-amarillo {{ background: rgba(250, 204, 21, 0.14); color: #fde047; border: 1px solid rgba(250, 204, 21, 0.35); }}
-  .badge-naranja  {{ background: rgba(251, 146, 60, 0.14); color: #fdba74; border: 1px solid rgba(251, 146, 60, 0.35); }}
-  .badge-rojo     {{ background: rgba(239, 68, 68, 0.16); color: #fca5a5; border: 1px solid rgba(239, 68, 68, 0.45); }}
-  .metric-wrap {{ display: flex; flex-direction: column; gap: 6px; min-width: 110px; }}
-  .bar-bg {{ width: 100%; height: 6px; background: #1e293b; border-radius: 4px; overflow: hidden; }}
-  .bar-fill {{ height: 100%; border-radius: 4px; }}
-  .btn-video {{
-    display: inline-block; padding: 6px 12px; border-radius: 8px; background: #1e293b;
-    color: #e2e8f0; text-decoration: none; font-size: 12px; font-weight: 600;
-    border: 1px solid #334155; transition: 0.15s;
-  }}
-  .btn-video:hover {{ background: #38bdf8; color: #0b0f17; border-color: #38bdf8; }}
-  .empty {{ text-align: center; color: var(--muted); padding: 36px; }}
-</style>
-</head>
-<body>
-<div class="container">
-  <header>
-    <div>
-      <h1>Historial de Monitoreo Sísmico</h1>
-      <div class="subtitle">Registro automático de eventos y grabaciones de video</div>
-    </div>
-    <div class="subtitle">Actualizado: {time.strftime("%d/%m/%Y %H:%M:%S")}</div>
-  </header>
-
-  <div class="cards">
-    <div class="card">
-      <div class="card-label">Eventos Registrados</div>
-      <div class="card-value">{total_eventos}</div>
-    </div>
-    <div class="card">
-      <div class="card-label">Pico Máximo Histórico</div>
-      <div class="card-value" style="color:#38bdf8;">{max_global:.2f} px</div>
-    </div>
-    <div class="card">
-      <div class="card-label">Alertas Rojas (Terremoto)</div>
-      <div class="card-value" style="color:#f87171;">{total_terremotos}</div>
-    </div>
-  </div>
-
-  <div class="table-box">
-    <table>
-      <thead>
-        <tr>
-          <th>Evento</th>
-          <th>Fecha</th>
-          <th>Horario</th>
-          <th>Duración</th>
-          <th>Clasificación</th>
-          <th>Pico Máximo</th>
-          <th>Promedio</th>
-          <th>Grabación</th>
-        </tr>
-      </thead>
-      <tbody>
-        {cuerpo_tabla}
-      </tbody>
-    </table>
-  </div>
-</div>
-</body>
-</html>"""
-
-    with open(ARCHIVO_REPORTE_HTML, mode="w", encoding="utf-8") as f:
-        f.write(pagina)
+        filas = list(csv.reader(f, delimiter=";"))
+    eventos = [r for r in filas[3:] if any(c.strip() for c in r)]
+    return len(eventos) + 1
 
 
 def guardar_evento_csv(fecha_ini, hora_ini, hora_fin, duracion, nivel_max, mag_max, mag_prom, nombre_archivo):
     inicializar_carpeta_registro()
-    num_evento = len(leer_eventos_csv()) + 1
+    num_evento = obtener_siguiente_num_evento()
     fecha_linda = time.strftime("%d/%m/%Y", time.strptime(fecha_ini, "%Y-%m-%d"))
 
     with open(ARCHIVO_REGISTRO_CSV, mode="a", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f, delimiter=";")
-        writer.writerow([
+        writer.writerow(centrar_celdas([
             f"#{num_evento:03d}",
             fecha_linda,
             hora_ini,
             hora_fin,
-            f"{duracion:.2f}",
-            descripcion_nivel_csv(nivel_max),
-            f"{mag_max:.2f}",
-            f"{mag_prom:.2f}",
+            f"{duracion:.2f} s",
+            clasificacion_csv(nivel_max),
+            f"{mag_max:.2f} px",
+            f"{mag_prom:.2f} px",
             nombre_archivo,
-        ])
-
-    regenerar_reporte_html()
+        ]))
 
 
 inicializar_carpeta_registro()
-regenerar_reporte_html()
 
 cap = cv2.VideoCapture(0)
 
