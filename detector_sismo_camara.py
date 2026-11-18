@@ -1,5 +1,9 @@
+import csv
+import html
 import math
+import os
 import time
+from collections import deque
 from functools import lru_cache
 
 import cv2
@@ -17,6 +21,10 @@ PANEL = (30, 20, 14)
 FUENTE = cv2.FONT_HERSHEY_DUPLEX
 AA = cv2.LINE_AA
 COLORES_SEGMENTOS = (VERDE, AMARILLO, NARANJA, ROJO)
+
+CARPETA_GRABACIONES = "grabaciones_sismos"
+ARCHIVO_REGISTRO_CSV = os.path.join(CARPETA_GRABACIONES, "registro_sismos.csv")
+ARCHIVO_REPORTE_HTML = os.path.join(CARPETA_GRABACIONES, "reporte_sismos.html")
 
 
 def mezclar(a, b, k):
@@ -129,7 +137,10 @@ def vineta_alerta(frame, color, fuerza):
     frame[:] = cv2.add(base, tinte)
 
 
-def dibujar_hud(frame, mag, estado, nivel, color, gauge_t, t, modo_manual=False, cant_puntos=0, mostrar_ayuda=True):
+def dibujar_hud(
+    frame, mag, estado, nivel, color, gauge_t, t,
+    modo_manual=False, cant_puntos=0, grabando=False, pico_evento=0.0, mostrar_ayuda=True
+):
     H, W = frame.shape[:2]
     s = max(0.6, W / 960.0)
 
@@ -222,6 +233,15 @@ def dibujar_hud(frame, mag, estado, nivel, color, gauge_t, t, modo_manual=False,
     texto(frame, etiqueta_pts, (W - m, m + ch + S(22)), 0.42 * s, color_etiqueta, 1,
           espaciado=S(1), ancla="der", sombra=True)
 
+    if grabando:
+        rw, rh = S(185), S(34)
+        rx, ry = W - m - rw, m + ch + S(34)
+        panel_vidrio(frame, rx, ry, rw, rh, rh // 2, tinte=mezclar(PANEL, ROJO, 0.45), alpha=0.80)
+        if int(t * 2) % 2 == 0:
+            cv2.circle(frame, (rx + S(18), ry + rh // 2), S(5), ROJO, -1, AA)
+        texto(frame, f"REC  MAX {pico_evento:.1f}px", (rx + S(30), ry + rh // 2 + S(5)), 0.40 * s, BLANCO, 1,
+              espaciado=S(1), sombra=False)
+
     if nivel == 3:
         bw2, bh2 = S(440), S(64)
         panel_vidrio(frame, (W - bw2) // 2, H - m - bh2, bw2, bh2, S(16),
@@ -310,6 +330,258 @@ def evaluar_nivel(mag):
     return "Normal", VERDE, 0
 
 
+def nombre_nivel_corto(nivel):
+    return {1: "SISMO_LEVE", 2: "SISMO_FUERTE", 3: "TERREMOTO"}.get(nivel, "NORMAL")
+
+
+def descripcion_nivel_csv(nivel):
+    return {
+        1: "Sismo Leve (Alerta Amarilla)",
+        2: "Sismo Fuerte (Alerta Naranja)",
+        3: "Terremoto (Alerta Roja)",
+    }.get(nivel, "Normal")
+
+
+ENCABEZADOS_CSV = [
+    "N° Evento",
+    "Fecha",
+    "Hora Inicio",
+    "Hora Fin",
+    "Duración (s)",
+    "Clasificación",
+    "Pico Máximo (px)",
+    "Promedio (px)",
+    "Archivo de Video",
+]
+
+
+def inicializar_carpeta_registro():
+    os.makedirs(CARPETA_GRABACIONES, exist_ok=True)
+    if not os.path.exists(ARCHIVO_REGISTRO_CSV) or os.path.getsize(ARCHIVO_REGISTRO_CSV) == 0:
+        with open(ARCHIVO_REGISTRO_CSV, mode="w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f, delimiter=";")
+            writer.writerow(ENCABEZADOS_CSV)
+
+
+def leer_eventos_csv():
+    if not os.path.exists(ARCHIVO_REGISTRO_CSV):
+        return []
+    eventos = []
+    with open(ARCHIVO_REGISTRO_CSV, mode="r", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f, delimiter=";")
+        for fila in reader:
+            if fila and fila.get("N° Evento"):
+                eventos.append(fila)
+    return eventos
+
+
+def regenerar_reporte_html():
+    """Genera un panel visual moderno en HTML dentro de la carpeta de grabaciones."""
+    eventos = leer_eventos_csv()
+    total_eventos = len(eventos)
+
+    max_global = 0.0
+    total_terremotos = 0
+    for ev in eventos:
+        try:
+            val_max = float(ev["Pico Máximo (px)"].replace(",", "."))
+            if val_max > max_global:
+                max_global = val_max
+        except (ValueError, KeyError):
+            pass
+        if "Terremoto" in ev.get("Clasificación", ""):
+            total_terremotos += 1
+
+    filas_html = []
+    for ev in reversed(eventos):
+        clasif = ev.get("Clasificación", "")
+        if "Terremoto" in clasif:
+            badge_cls = "badge-rojo"
+            bar_color = "#ef4444"
+        elif "Fuerte" in clasif:
+            badge_cls = "badge-naranja"
+            bar_color = "#fb923c"
+        else:
+            badge_cls = "badge-amarillo"
+            bar_color = "#facc15"
+
+        try:
+            pico_num = float(ev.get("Pico Máximo (px)", "0").replace(",", "."))
+        except ValueError:
+            pico_num = 0.0
+        ancho_barra = min(100, int((pico_num / 30.0) * 100))
+
+        video_file = html.escape(ev.get("Archivo de Video", ""))
+        filas_html.append(f"""
+            <tr>
+                <td class="col-id">{html.escape(ev.get('N° Evento', ''))}</td>
+                <td>{html.escape(ev.get('Fecha', ''))}</td>
+                <td class="mono">{html.escape(ev.get('Hora Inicio', ''))} &rarr; {html.escape(ev.get('Hora Fin', ''))}</td>
+                <td class="mono">{html.escape(ev.get('Duración (s)', ''))} s</td>
+                <td><span class="badge {badge_cls}">{html.escape(clasif)}</span></td>
+                <td>
+                    <div class="metric-wrap">
+                        <span class="mono strong">{pico_num:.2f} px</span>
+                        <div class="bar-bg"><div class="bar-fill" style="width:{ancho_barra}%;background:{bar_color};"></div></div>
+                    </div>
+                </td>
+                <td class="mono">{html.escape(ev.get('Promedio (px)', ''))} px</td>
+                <td><a class="btn-video" href="{video_file}" target="_blank">&#9654; Ver video</a></td>
+            </tr>
+        """)
+
+    cuerpo_tabla = (
+        "\n".join(filas_html)
+        if filas_html
+        else '<tr><td colspan="8" class="empty">Aún no se han registrado movimientos sísmicos.</td></tr>'
+    )
+
+    pagina = f"""<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Reporte de Monitoreo Sísmico</title>
+<style>
+  :root {{
+    --bg: #0b0f17;
+    --card: #131a26;
+    --border: #222d40;
+    --text: #e2e8f0;
+    --muted: #8b9bb4;
+  }}
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 36px;
+  }}
+  .container {{ max-width: 1200px; margin: 0 auto; }}
+  header {{
+    display: flex; justify-content: space-between; align-items: flex-end;
+    margin-bottom: 28px; border-bottom: 1px solid var(--border); padding-bottom: 18px;
+  }}
+  h1 {{ font-size: 24px; font-weight: 700; letter-spacing: 0.5px; }}
+  .subtitle {{ color: var(--muted); font-size: 13px; margin-top: 4px; }}
+  .cards {{
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin-bottom: 28px;
+  }}
+  .card {{
+    background: var(--card); border: 1px solid var(--border); border-radius: 14px;
+    padding: 20px 24px;
+  }}
+  .card-label {{ font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); }}
+  .card-value {{ font-size: 30px; font-weight: 700; margin-top: 8px; }}
+  .table-box {{
+    background: var(--card); border: 1px solid var(--border); border-radius: 14px;
+    overflow: hidden; box-shadow: 0 12px 30px rgba(0,0,0,0.35);
+  }}
+  table {{ width: 100%; border-collapse: collapse; font-size: 14px; }}
+  th {{
+    background: #182131; color: var(--muted); font-size: 11px; text-transform: uppercase;
+    letter-spacing: 1px; text-align: left; padding: 14px 16px; border-bottom: 1px solid var(--border);
+  }}
+  td {{ padding: 14px 16px; border-bottom: 1px solid var(--border); vertical-align: middle; }}
+  tr:last-child td {{ border-bottom: none; }}
+  tr:hover td {{ background: rgba(255,255,255,0.02); }}
+  .col-id {{ font-weight: 700; color: #38bdf8; }}
+  .mono {{ font-variant-numeric: tabular-nums; }}
+  .strong {{ font-weight: 700; }}
+  .badge {{
+    display: inline-block; padding: 5px 11px; border-radius: 999px; font-size: 12px; font-weight: 600;
+  }}
+  .badge-amarillo {{ background: rgba(250, 204, 21, 0.14); color: #fde047; border: 1px solid rgba(250, 204, 21, 0.35); }}
+  .badge-naranja  {{ background: rgba(251, 146, 60, 0.14); color: #fdba74; border: 1px solid rgba(251, 146, 60, 0.35); }}
+  .badge-rojo     {{ background: rgba(239, 68, 68, 0.16); color: #fca5a5; border: 1px solid rgba(239, 68, 68, 0.45); }}
+  .metric-wrap {{ display: flex; flex-direction: column; gap: 6px; min-width: 110px; }}
+  .bar-bg {{ width: 100%; height: 6px; background: #1e293b; border-radius: 4px; overflow: hidden; }}
+  .bar-fill {{ height: 100%; border-radius: 4px; }}
+  .btn-video {{
+    display: inline-block; padding: 6px 12px; border-radius: 8px; background: #1e293b;
+    color: #e2e8f0; text-decoration: none; font-size: 12px; font-weight: 600;
+    border: 1px solid #334155; transition: 0.15s;
+  }}
+  .btn-video:hover {{ background: #38bdf8; color: #0b0f17; border-color: #38bdf8; }}
+  .empty {{ text-align: center; color: var(--muted); padding: 36px; }}
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <div>
+      <h1>Historial de Monitoreo Sísmico</h1>
+      <div class="subtitle">Registro automático de eventos y grabaciones de video</div>
+    </div>
+    <div class="subtitle">Actualizado: {time.strftime("%d/%m/%Y %H:%M:%S")}</div>
+  </header>
+
+  <div class="cards">
+    <div class="card">
+      <div class="card-label">Eventos Registrados</div>
+      <div class="card-value">{total_eventos}</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Pico Máximo Histórico</div>
+      <div class="card-value" style="color:#38bdf8;">{max_global:.2f} px</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Alertas Rojas (Terremoto)</div>
+      <div class="card-value" style="color:#f87171;">{total_terremotos}</div>
+    </div>
+  </div>
+
+  <div class="table-box">
+    <table>
+      <thead>
+        <tr>
+          <th>Evento</th>
+          <th>Fecha</th>
+          <th>Horario</th>
+          <th>Duración</th>
+          <th>Clasificación</th>
+          <th>Pico Máximo</th>
+          <th>Promedio</th>
+          <th>Grabación</th>
+        </tr>
+      </thead>
+      <tbody>
+        {cuerpo_tabla}
+      </tbody>
+    </table>
+  </div>
+</div>
+</body>
+</html>"""
+
+    with open(ARCHIVO_REPORTE_HTML, mode="w", encoding="utf-8") as f:
+        f.write(pagina)
+
+
+def guardar_evento_csv(fecha_ini, hora_ini, hora_fin, duracion, nivel_max, mag_max, mag_prom, nombre_archivo):
+    inicializar_carpeta_registro()
+    num_evento = len(leer_eventos_csv()) + 1
+    fecha_linda = time.strftime("%d/%m/%Y", time.strptime(fecha_ini, "%Y-%m-%d"))
+
+    with open(ARCHIVO_REGISTRO_CSV, mode="a", newline="", encoding="utf-8-sig") as f:
+        writer = csv.writer(f, delimiter=";")
+        writer.writerow([
+            f"#{num_evento:03d}",
+            fecha_linda,
+            hora_ini,
+            hora_fin,
+            f"{duracion:.2f}",
+            descripcion_nivel_csv(nivel_max),
+            f"{mag_max:.2f}",
+            f"{mag_prom:.2f}",
+            nombre_archivo,
+        ])
+
+    regenerar_reporte_html()
+
+
+inicializar_carpeta_registro()
+regenerar_reporte_html()
+
 cap = cv2.VideoCapture(0)
 
 ret, prev_frame = cap.read()
@@ -319,6 +591,10 @@ if not ret:
 
 prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
 H_img, W_img = prev_gray.shape
+
+fps_cam = cap.get(cv2.CAP_PROP_FPS)
+if not fps_cam or fps_cam <= 1 or fps_cam > 120:
+    fps_cam = 30.0
 
 hann = cv2.createHanningWindow((W_img, H_img), cv2.CV_32F)
 prev_float = prev_gray.astype(np.float32)
@@ -342,9 +618,57 @@ estado_retenido = "Normal"
 color_retenido = VERDE
 ultimo_pico_t = 0.0
 
+buffer_previo = deque(maxlen=int(fps_cam * 2))
+grabando = False
+writer_video = None
+ruta_temp_video = ""
+fecha_inicio_ev = ""
+hora_inicio_ev = ""
+t_inicio_ev = 0.0
+t_ultimo_mov_ev = 0.0
+pico_mag_ev = 0.0
+nivel_max_ev = 0
+lecturas_mag_ev = []
+MARGEN_POST_SISMO = 2.0
+
 gauge_t = 0.0
 mostrar_puntos = True
 NOMBRE_VENTANA = "Monitor Sismico Estable"
+
+
+def finalizar_grabacion():
+    global grabando, writer_video
+    if not grabando or writer_video is None:
+        return
+
+    writer_video.release()
+    writer_video = None
+    grabando = False
+
+    hora_fin_ev = time.strftime("%H:%M:%S")
+    duracion = max(0.1, time.time() - t_inicio_ev)
+    mag_prom = float(np.mean(lecturas_mag_ev)) if lecturas_mag_ev else pico_mag_ev
+    etiqueta_niv = nombre_nivel_corto(nivel_max_ev)
+
+    nombre_final = (
+        f"sismo_{fecha_inicio_ev}_{hora_inicio_ev.replace(':', '-')}_"
+        f"{etiqueta_niv}_max{pico_mag_ev:.1f}px.mp4"
+    )
+    ruta_final = os.path.join(CARPETA_GRABACIONES, nombre_final)
+
+    if os.path.exists(ruta_temp_video):
+        os.replace(ruta_temp_video, ruta_final)
+
+    guardar_evento_csv(
+        fecha_inicio_ev,
+        hora_inicio_ev,
+        hora_fin_ev,
+        duracion,
+        nivel_max_ev,
+        pico_mag_ev,
+        mag_prom,
+        nombre_final,
+    )
 
 
 def manejar_clic(event, x, y, flags, param):
@@ -389,7 +713,6 @@ while cap.isOpened():
     curr_float = curr_gray.astype(np.float32)
     magnitude = 0.0
 
-    # Solo rastrea y mide si existen puntos activos
     if p0 is not None and len(p0) > 0:
         p1, st, err = cv2.calcOpticalFlowPyrLK(
             prev_gray, curr_gray, p0, None, **lk_params
@@ -402,14 +725,12 @@ while cap.isOpened():
 
             if len(buenos_nuevos) > 0:
                 if modo_manual:
-                    # En modo manual mide el desplazamiento de los puntos elegidos
                     desplazamientos = buenos_nuevos.reshape(-1, 2) - buenos_antiguos.reshape(-1, 2)
                     vector_mediano = np.median(desplazamientos, axis=0)
                     desp_manual = float(np.linalg.norm(vector_mediano))
                     if desp_manual > UMBRAL_RUIDO_SENSOR:
                         magnitude = desp_manual
                 else:
-                    # En modo auto usa correlacion de fase global respaldada por los puntos activos
                     (dx, dy), respuesta = cv2.phaseCorrelate(prev_float, curr_float, hann)
                     desplazamiento_camara = math.hypot(dx, dy)
                     if respuesta > 0.15 and desplazamiento_camara > UMBRAL_RUIDO_SENSOR:
@@ -430,13 +751,11 @@ while cap.isOpened():
         else:
             p0 = None
 
-    # Solo rellena automaticamente si NO estas en modo manual
     if not modo_manual and (p0 is None or len(p0) < MAX_PUNTOS):
         p0 = detectar_10_puntos_distribuidos(curr_gray, p0, max_puntos=MAX_PUNTOS)
 
     cant_actual = len(p0) if p0 is not None else 0
 
-    # Si no hay ningun punto activo, bloquea la deteccion y reinicia estados
     if cant_actual == 0:
         smoothed_mag = 0.0
         nivel_retenido = 0
@@ -472,8 +791,46 @@ while cap.isOpened():
     gauge_t += (pos_gauge(smoothed_mag) - gauge_t) * 0.25
     dibujar_hud(
         frame, smoothed_mag, estado_retenido, nivel_retenido, color_retenido,
-        gauge_t, ahora, modo_manual=modo_manual, cant_puntos=cant_actual
+        gauge_t, ahora, modo_manual=modo_manual, cant_puntos=cant_actual,
+        grabando=grabando, pico_evento=pico_mag_ev
     )
+
+    if nivel_retenido > 0 and cant_actual > 0:
+        t_ultimo_mov_ev = ahora
+        if not grabando:
+            grabando = True
+            fecha_inicio_ev = time.strftime("%Y-%m-%d")
+            hora_inicio_ev = time.strftime("%H:%M:%S")
+            t_inicio_ev = ahora
+            pico_mag_ev = smoothed_mag
+            nivel_max_ev = nivel_retenido
+            lecturas_mag_ev = [smoothed_mag]
+
+            ruta_temp_video = os.path.join(CARPETA_GRABACIONES, f"grabando_{int(ahora)}.mp4")
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            writer_video = cv2.VideoWriter(ruta_temp_video, fourcc, fps_cam, (W_img, H_img))
+
+            for f_prev in buffer_previo:
+                writer_video.write(f_prev)
+            buffer_previo.clear()
+        else:
+            if smoothed_mag > pico_mag_ev:
+                pico_mag_ev = smoothed_mag
+            if nivel_retenido > nivel_max_ev:
+                nivel_max_ev = nivel_retenido
+            if smoothed_mag > 0:
+                lecturas_mag_ev.append(smoothed_mag)
+
+        if writer_video is not None:
+            writer_video.write(frame)
+    else:
+        if grabando:
+            if writer_video is not None:
+                writer_video.write(frame)
+            if (ahora - t_ultimo_mov_ev) >= MARGEN_POST_SISMO:
+                finalizar_grabacion()
+        else:
+            buffer_previo.append(frame.copy())
 
     cv2.imshow(NOMBRE_VENTANA, frame)
 
@@ -488,6 +845,9 @@ while cap.isOpened():
     if tecla == ord("c"):
         modo_manual = False
         p0 = detectar_10_puntos_distribuidos(curr_gray, max_puntos=MAX_PUNTOS)
+
+if grabando:
+    finalizar_grabacion()
 
 cap.release()
 cv2.destroyAllWindows()
