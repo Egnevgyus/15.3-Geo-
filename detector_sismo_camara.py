@@ -11,6 +11,7 @@ NARANJA = (60, 146, 251)
 ROJO = (68, 68, 239)
 GRIS = (175, 163, 156)
 BLANCO = (245, 245, 245)
+CIAN = (240, 210, 60)
 PANEL = (30, 20, 14)
 
 FUENTE = cv2.FONT_HERSHEY_DUPLEX
@@ -102,13 +103,13 @@ def barra(img, x, y, w, h, color):
 
 
 def pos_gauge(v):
-    if v < 1.5:
-        return v / 1.5
+    if v < 1.2:
+        return v / 1.2
     if v < 5.0:
-        return 1 + (v - 1.5) / 3.5
-    if v < 10.0:
-        return 2 + (v - 5.0) / 5.0
-    return min(4.0, 3 + (v - 10.0) / 5.0)
+        return 1 + (v - 1.2) / 3.8
+    if v < 20.0:
+        return 2 + (v - 5.0) / 15.0
+    return min(4.0, 3 + (v - 20.0) / 10.0)
 
 
 @lru_cache(maxsize=4)
@@ -128,7 +129,7 @@ def vineta_alerta(frame, color, fuerza):
     frame[:] = cv2.add(base, tinte)
 
 
-def dibujar_hud(frame, mag, estado, nivel, color, gauge_t, t, mostrar_ayuda=True):
+def dibujar_hud(frame, mag, estado, nivel, color, gauge_t, t, modo_manual=False, cant_puntos=0, mostrar_ayuda=True):
     H, W = frame.shape[:2]
     s = max(0.6, W / 960.0)
 
@@ -147,7 +148,7 @@ def dibujar_hud(frame, mag, estado, nivel, color, gauge_t, t, mostrar_ayuda=True
     panel_vidrio(frame, m, m, pw, ph, S(18))
     x0 = m + S(24)
 
-    texto(frame, "MONITOR SISMICO", (x0, m + S(34)), 0.5 * s, GRIS, 1, espaciado=S(2), sombra=False)
+    texto(frame, "MONITOREO SISMICO", (x0, m + S(34)), 0.5 * s, GRIS, 1, espaciado=S(2), sombra=False)
 
     cx, cy = m + pw - S(28), m + S(29)
     radio_halo = S(5) + int(S(6) * pulso)
@@ -186,9 +187,9 @@ def dibujar_hud(frame, mag, estado, nivel, color, gauge_t, t, mostrar_ayuda=True
     cv2.circle(frame, (xm, ym), S(8), (20, 14, 10), -1, AA)
     cv2.circle(frame, (xm, ym), S(6), BLANCO, -1, AA)
 
-    marcas = [("0", gx0, "izq"), ("1.5", gx0 + seg_w + hueco // 2, "centro"),
+    marcas = [("0", gx0, "izq"), ("1.2", gx0 + seg_w + hueco // 2, "centro"),
               ("5", gx0 + 2 * seg_w + hueco + hueco // 2, "centro"),
-              ("10", gx0 + 3 * seg_w + 2 * hueco + hueco // 2, "centro")]
+              ("20", gx0 + 3 * seg_w + 2 * hueco + hueco // 2, "centro")]
     for etiqueta, mx, ancla in marcas:
         texto(frame, etiqueta, (mx, gy0 + alto_barra + S(18)), 0.36 * s, oscurecer(GRIS, 0.8), 1,
               ancla=ancla, sombra=False)
@@ -216,6 +217,11 @@ def dibujar_hud(frame, mag, estado, nivel, color, gauge_t, t, mostrar_ayuda=True
     texto(frame, time.strftime("%d/%m/%Y"), (W - m - cw + S(18), m + S(48)), 0.4 * s, GRIS, 1,
           espaciado=S(1), sombra=False)
 
+    color_etiqueta = ROJO if cant_puntos == 0 else (CIAN if modo_manual else GRIS)
+    etiqueta_pts = f"PUNTOS {'MANUAL' if modo_manual else 'AUTO'}: {cant_puntos}/10"
+    texto(frame, etiqueta_pts, (W - m, m + ch + S(22)), 0.42 * s, color_etiqueta, 1,
+          espaciado=S(1), ancla="der", sombra=True)
+
     if nivel == 3:
         bw2, bh2 = S(440), S(64)
         panel_vidrio(frame, (W - bw2) // 2, H - m - bh2, bw2, bh2, S(16),
@@ -223,99 +229,265 @@ def dibujar_hud(frame, mag, estado, nivel, color, gauge_t, t, mostrar_ayuda=True
         texto(frame, "TERREMOTO", ((W) // 2, H - m - bh2 // 2 + S(12)), 1.25 * s, BLANCO, max(2, S(2)),
               ancla="centro", sombra=True)
     elif mostrar_ayuda:
-        texto(frame, "Q  SALIR    P  PUNTOS", (m, H - S(18)), 0.4 * s, oscurecer(GRIS, 0.9), 1, espaciado=S(1), sombra=True)
+        texto(frame, "CLIC IZQ: PONER PUNTO   CLIC DER: QUITAR   C: AUTO   P: VER/OCULTAR   Q: SALIR",
+              (m, H - S(18)), 0.38 * s, oscurecer(GRIS, 0.9), 1, espaciado=S(1), sombra=True)
+
+
+def detectar_10_puntos_distribuidos(gray, puntos_existentes=None, max_puntos=10):
+    """Mantiene exactamente 10 puntos repartidos en una cuadricula 5x2."""
+    H, W = gray.shape
+    filas, cols = 2, 5
+    celda_h, celda_w = H // filas, W // cols
+    margen_borde = 25
+
+    existentes_2d = (
+        puntos_existentes.reshape(-1, 2)
+        if puntos_existentes is not None and len(puntos_existentes) > 0
+        else np.empty((0, 2), dtype=np.float32)
+    )
+
+    nuevos_pts = []
+    for r in range(filas):
+        for c in range(cols):
+            if len(existentes_2d) + len(nuevos_pts) >= max_puntos:
+                break
+
+            y1 = max(margen_borde, r * celda_h)
+            y2 = min(H - margen_borde, (r + 1) * celda_h)
+            x1 = max(margen_borde, c * celda_w)
+            x2 = min(W - margen_borde, (c + 1) * celda_w)
+
+            if len(existentes_2d) > 0:
+                en_celda = (
+                    (existentes_2d[:, 0] >= x1) & (existentes_2d[:, 0] < x2) &
+                    (existentes_2d[:, 1] >= y1) & (existentes_2d[:, 1] < y2)
+                )
+                if np.any(en_celda):
+                    continue
+
+            mascara = np.zeros_like(gray)
+            mascara[y1:y2, x1:x2] = 255
+            pt = cv2.goodFeaturesToTrack(
+                gray, mask=mascara, maxCorners=1, qualityLevel=0.08, minDistance=20, blockSize=7
+            )
+            if pt is not None:
+                nuevos_pts.append(pt[0])
+
+    faltantes = max_puntos - (len(existentes_2d) + len(nuevos_pts))
+    if faltantes > 0:
+        todos_actuales = (
+            np.vstack([existentes_2d, np.array(nuevos_pts).reshape(-1, 2)])
+            if len(nuevos_pts) > 0
+            else existentes_2d
+        )
+        extras = cv2.goodFeaturesToTrack(
+            gray, maxCorners=max_puntos * 2, qualityLevel=0.08, minDistance=35, blockSize=7
+        )
+        if extras is not None:
+            for e in extras:
+                if len(existentes_2d) + len(nuevos_pts) >= max_puntos:
+                    break
+                if len(todos_actuales) == 0 or np.min(np.linalg.norm(todos_actuales - e.ravel(), axis=1)) > 35:
+                    nuevos_pts.append(e)
+                    todos_actuales = np.vstack([todos_actuales, e.reshape(1, 2)])
+
+    if len(nuevos_pts) > 0:
+        arr_nuevos = np.array(nuevos_pts, dtype=np.float32).reshape(-1, 1, 2)
+        if puntos_existentes is not None and len(puntos_existentes) > 0:
+            return np.vstack((puntos_existentes, arr_nuevos))[:max_puntos]
+        return arr_nuevos[:max_puntos]
+
+    return puntos_existentes
+
+
+def evaluar_nivel(mag):
+    if mag > 20.0:
+        return "TERREMOTO - ALERTA ROJA", ROJO, 3
+    if mag > 5.0:
+        return "Sismo Fuerte - ALERTA NARANJA", NARANJA, 2
+    if mag > 0.0:
+        return "Sismo Leve - ALERTA AMARILLA", AMARILLO, 1
+    return "Normal", VERDE, 0
 
 
 cap = cv2.VideoCapture(0)
 
 ret, prev_frame = cap.read()
 if not ret:
-  cap.release()
-  exit()
+    cap.release()
+    exit()
 
 prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
-h_img, w_img = prev_gray.shape
+H_img, W_img = prev_gray.shape
 
-feature_params = dict(
-    maxCorners=200, qualityLevel=0.1, minDistance=10, blockSize=7
-)
+hann = cv2.createHanningWindow((W_img, H_img), cv2.CV_32F)
+prev_float = prev_gray.astype(np.float32)
+
+MAX_PUNTOS = 10
 lk_params = dict(
-    winSize=(21, 21),
+    winSize=(25, 25),
     maxLevel=3,
     criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
 )
 
-p0 = cv2.goodFeaturesToTrack(prev_gray, mask=None, **feature_params)
+p0 = detectar_10_puntos_distribuidos(prev_gray, max_puntos=MAX_PUNTOS)
+modo_manual = False
+
+UMBRAL_RUIDO_SENSOR = 0.25
 smoothed_mag = 0.0
+
+TIEMPO_RETENCION = 1.5
+nivel_retenido = 0
+estado_retenido = "Normal"
+color_retenido = VERDE
+ultimo_pico_t = 0.0
 
 gauge_t = 0.0
 mostrar_puntos = True
+NOMBRE_VENTANA = "Monitor Sismico Estable"
+
+
+def manejar_clic(event, x, y, flags, param):
+    global p0, modo_manual, mostrar_puntos
+
+    if event == cv2.EVENT_LBUTTONDOWN:
+        mostrar_puntos = True
+        nuevo_pt = np.array([[[float(x), float(y)]]], dtype=np.float32)
+
+        if not modo_manual:
+            modo_manual = True
+            p0 = nuevo_pt
+        else:
+            if p0 is None or len(p0) == 0:
+                p0 = nuevo_pt
+            elif len(p0) < MAX_PUNTOS:
+                p0 = np.vstack((p0, nuevo_pt))
+            else:
+                p0 = np.vstack((p0[1:], nuevo_pt))
+
+    elif event == cv2.EVENT_RBUTTONDOWN:
+        if p0 is not None and len(p0) > 0:
+            pts_2d = p0.reshape(-1, 2)
+            distancias = np.linalg.norm(pts_2d - np.array([x, y]), axis=1)
+            idx_cercano = int(np.argmin(distancias))
+            if distancias[idx_cercano] <= 25.0:
+                p0 = np.delete(p0, idx_cercano, axis=0)
+                if len(p0) == 0:
+                    p0 = None
+
+
+cv2.namedWindow(NOMBRE_VENTANA)
+cv2.setMouseCallback(NOMBRE_VENTANA, manejar_clic)
 
 while cap.isOpened():
-  ret, frame = cap.read()
-  if not ret:
-    break
+    ret, frame = cap.read()
+    if not ret:
+        break
 
-  curr_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    ahora = time.time()
+    curr_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    curr_float = curr_gray.astype(np.float32)
+    magnitude = 0.0
 
-  magnitude = 0.0
+    # Solo rastrea y mide si existen puntos activos
+    if p0 is not None and len(p0) > 0:
+        p1, st, err = cv2.calcOpticalFlowPyrLK(
+            prev_gray, curr_gray, p0, None, **lk_params
+        )
 
-  if p0 is not None and len(p0) > 10:
-    p1, st, err = cv2.calcOpticalFlowPyrLK(
-        prev_gray, curr_gray, p0, None, **lk_params
+        if p1 is not None and st is not None:
+            validos = st.ravel() == 1
+            buenos_antiguos = p0[validos]
+            buenos_nuevos = p1[validos]
+
+            if len(buenos_nuevos) > 0:
+                if modo_manual:
+                    # En modo manual mide el desplazamiento de los puntos elegidos
+                    desplazamientos = buenos_nuevos.reshape(-1, 2) - buenos_antiguos.reshape(-1, 2)
+                    vector_mediano = np.median(desplazamientos, axis=0)
+                    desp_manual = float(np.linalg.norm(vector_mediano))
+                    if desp_manual > UMBRAL_RUIDO_SENSOR:
+                        magnitude = desp_manual
+                else:
+                    # En modo auto usa correlacion de fase global respaldada por los puntos activos
+                    (dx, dy), respuesta = cv2.phaseCorrelate(prev_float, curr_float, hann)
+                    desplazamiento_camara = math.hypot(dx, dy)
+                    if respuesta > 0.15 and desplazamiento_camara > UMBRAL_RUIDO_SENSOR:
+                        magnitude = desplazamiento_camara
+
+                if mostrar_puntos:
+                    for pt in buenos_nuevos:
+                        nx, ny = map(int, pt.ravel())
+                        if modo_manual:
+                            cv2.circle(frame, (nx, ny), 6, CIAN, 1, cv2.LINE_8)
+                            cv2.circle(frame, (nx, ny), 2, BLANCO, -1, cv2.LINE_8)
+                        else:
+                            cv2.circle(frame, (nx, ny), 3, (230, 230, 230), -1, cv2.LINE_8)
+
+                p0 = buenos_nuevos.reshape(-1, 1, 2)
+            else:
+                p0 = None
+        else:
+            p0 = None
+
+    # Solo rellena automaticamente si NO estas en modo manual
+    if not modo_manual and (p0 is None or len(p0) < MAX_PUNTOS):
+        p0 = detectar_10_puntos_distribuidos(curr_gray, p0, max_puntos=MAX_PUNTOS)
+
+    cant_actual = len(p0) if p0 is not None else 0
+
+    # Si no hay ningun punto activo, bloquea la deteccion y reinicia estados
+    if cant_actual == 0:
+        smoothed_mag = 0.0
+        nivel_retenido = 0
+        estado_retenido = "Sin Puntos - EN ESPERA"
+        color_retenido = GRIS
+    else:
+        if magnitude > smoothed_mag:
+            smoothed_mag = (0.25 * smoothed_mag) + (0.75 * magnitude)
+        else:
+            smoothed_mag = (0.92 * smoothed_mag) + (0.08 * magnitude)
+
+        if smoothed_mag < 1.2:
+            smoothed_mag = 0.0
+
+        estado_actual, color_actual, nivel_actual = evaluar_nivel(smoothed_mag)
+
+        if nivel_actual >= nivel_retenido and nivel_actual > 0:
+            nivel_retenido = nivel_actual
+            estado_retenido = estado_actual
+            color_retenido = color_actual
+            ultimo_pico_t = ahora
+        elif nivel_retenido > 0:
+            if (ahora - ultimo_pico_t) > TIEMPO_RETENCION:
+                nivel_retenido = nivel_actual
+                estado_retenido = estado_actual
+                color_retenido = color_actual
+                if nivel_actual > 0:
+                    ultimo_pico_t = ahora
+        elif nivel_retenido == 0:
+            estado_retenido = estado_actual
+            color_retenido = color_actual
+
+    gauge_t += (pos_gauge(smoothed_mag) - gauge_t) * 0.25
+    dibujar_hud(
+        frame, smoothed_mag, estado_retenido, nivel_retenido, color_retenido,
+        gauge_t, ahora, modo_manual=modo_manual, cant_puntos=cant_actual
     )
 
-    if p1 is not None:
-      good_old = p0[st == 1]
-      good_new = p1[st == 1]
+    cv2.imshow(NOMBRE_VENTANA, frame)
 
-      if len(good_old) > 10:
-        displacements = good_new - good_old
-        magnitudes = np.linalg.norm(displacements, axis=1)
-        magnitude = np.median(magnitudes)
+    prev_gray = curr_gray.copy()
+    prev_float = curr_float
 
-        if mostrar_puntos:
-          for pt in good_new:
-            nx, ny = map(int, pt.ravel())
-            cv2.circle(frame, (nx, ny), 2, (230, 230, 230), -1, AA)
-
-  smoothed_mag = (0.6 * smoothed_mag) + (0.4 * magnitude)
-
-  if smoothed_mag < 1.5:
-    smoothed_mag = 0.0
-
-  estado = "Normal"
-  color = VERDE
-  nivel = 0
-
-  if smoothed_mag > 10.0:
-    estado = "TERREMOTO - ALERTA ROJA"
-    color = ROJO
-    nivel = 3
-  elif smoothed_mag > 5.0:
-    estado = "Sismo Fuerte - ALERTA NARANJA"
-    color = NARANJA
-    nivel = 2
-  elif smoothed_mag > 0.0:
-    estado = "Sismo Leve - ALERTA AMARILLA"
-    color = AMARILLO
-    nivel = 1
-
-  gauge_t += (pos_gauge(smoothed_mag) - gauge_t) * 0.25
-  dibujar_hud(frame, smoothed_mag, estado, nivel, color, gauge_t, time.time())
-
-  cv2.imshow("Monitor Sismico Estable", frame)
-
-  prev_gray = curr_gray.copy()
-  p0 = cv2.goodFeaturesToTrack(prev_gray, mask=None, **feature_params)
-  if p0 is None or len(p0) < 10:
-    p0 = cv2.goodFeaturesToTrack(prev_gray, mask=None, **feature_params)
-
-  tecla = cv2.waitKey(1) & 0xFF
-  if tecla == ord("q"):
-    break
-  if tecla == ord("p"):
-    mostrar_puntos = not mostrar_puntos
+    tecla = cv2.waitKey(1) & 0xFF
+    if tecla == ord("q"):
+        break
+    if tecla == ord("p"):
+        mostrar_puntos = not mostrar_puntos
+    if tecla == ord("c"):
+        modo_manual = False
+        p0 = detectar_10_puntos_distribuidos(curr_gray, max_puntos=MAX_PUNTOS)
 
 cap.release()
 cv2.destroyAllWindows()
