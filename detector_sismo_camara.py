@@ -1,6 +1,7 @@
 import csv
 import math
 import os
+import sys
 import time
 from collections import deque
 from functools import lru_cache
@@ -21,7 +22,16 @@ FUENTE = cv2.FONT_HERSHEY_DUPLEX
 AA = cv2.LINE_AA
 COLORES_SEGMENTOS = (VERDE, AMARILLO, NARANJA, ROJO)
 
-CARPETA_GRABACIONES = "grabaciones_sismos"
+INDICE_CAMARA = 0
+ANCHO_CAPTURA, ALTO_CAPTURA = 640, 480
+
+UMBRAL_MOVIMIENTO_EJE = 0.25
+UMBRAL_VIENTO = 2.80
+UMBRAL_FUERTE = 8.0
+UMBRAL_TERREMOTO = 25.0
+
+CARPETA_BASE = os.path.dirname(os.path.abspath(__file__))
+CARPETA_GRABACIONES = os.path.join(CARPETA_BASE, "grabaciones_sismos")
 ARCHIVO_REGISTRO_CSV = os.path.join(CARPETA_GRABACIONES, "registro_sismos.csv")
 
 pos_total_x = 0.0
@@ -114,13 +124,13 @@ def barra(img, x, y, w, h, color):
 def pos_gauge(v):
     if v <= 0.0:
         return 0.0
-    if v < 2.8:
-        return v / 2.8
-    if v < 8.0:
-        return 1.0 + (v - 2.8) / 5.2
-    if v < 25.0:
-        return 2.0 + (v - 8.0) / 17.0
-    return min(4.0, 3.0 + (v - 25.0) / 15.0)
+    if v < UMBRAL_VIENTO:
+        return v / UMBRAL_VIENTO
+    if v < UMBRAL_FUERTE:
+        return 1.0 + (v - UMBRAL_VIENTO) / (UMBRAL_FUERTE - UMBRAL_VIENTO)
+    if v < UMBRAL_TERREMOTO:
+        return 2.0 + (v - UMBRAL_FUERTE) / (UMBRAL_TERREMOTO - UMBRAL_FUERTE)
+    return min(4.0, 3.0 + (v - UMBRAL_TERREMOTO) / 15.0)
 
 
 @lru_cache(maxsize=4)
@@ -202,9 +212,9 @@ def dibujar_hud(
     cv2.circle(frame, (xm, ym), S(8), (20, 14, 10), -1, AA)
     cv2.circle(frame, (xm, ym), S(6), BLANCO, -1, AA)
 
-    marcas = [("0", gx0, "izq"), ("2.8", gx0 + seg_w + hueco // 2, "centro"),
-              ("8", gx0 + 2 * seg_w + hueco + hueco // 2, "centro"),
-              ("25", gx0 + 3 * seg_w + 2 * hueco + hueco // 2, "centro")]
+    marcas = [("0", gx0, "izq"), (f"{UMBRAL_VIENTO:g}", gx0 + seg_w + hueco // 2, "centro"),
+              (f"{UMBRAL_FUERTE:g}", gx0 + 2 * seg_w + hueco + hueco // 2, "centro"),
+              (f"{UMBRAL_TERREMOTO:g}", gx0 + 3 * seg_w + 2 * hueco + hueco // 2, "centro")]
     for etiqueta, mx, ancla in marcas:
         texto(frame, etiqueta, (mx, gy0 + alto_barra + S(18)), 0.36 * s, oscurecer(GRIS, 0.8), 1,
               ancla=ancla, sombra=False)
@@ -324,9 +334,9 @@ def detectar_puntos_distribuidos(gray, puntos_existentes=None, max_puntos=10):
 
 
 def evaluar_nivel(mag):
-    if mag > 25.0:
+    if mag > UMBRAL_TERREMOTO:
         return "TERREMOTO - ALERTA ROJA", ROJO, 3
-    if mag > 8.0:
+    if mag > UMBRAL_FUERTE:
         return "Sismo Fuerte - ALERTA NARANJA", NARANJA, 2
     if mag > 0.0:
         return "Sismo Leve - ALERTA AMARILLA", AMARILLO, 1
@@ -393,31 +403,42 @@ def guardar_evento_csv(fecha_ini, hora_ini, hora_fin, duracion, nivel_max, max_i
     num_evento = obtener_siguiente_num_evento()
     fecha_linda = time.strftime("%d/%m/%Y", time.strptime(fecha_ini, "%Y-%m-%d"))
 
-    with open(ARCHIVO_REGISTRO_CSV, mode="a", newline="", encoding="utf-8-sig") as f:
-        writer = csv.writer(f, delimiter=";")
-        writer.writerow(centrar_celdas([
-            f"#{num_evento:03d}",
-            fecha_linda,
-            hora_ini,
-            hora_fin,
-            f"{duracion:.2f} s",
-            clasificacion_csv(nivel_max),
-            f"-{max_izq:.2f} px",
-            f"+{max_der:.2f} px",
-            f"-{max_abj:.2f} px",
-            f"+{max_arr:.2f} px",
-            nombre_archivo,
-        ]))
+    fila = centrar_celdas([
+        f"#{num_evento:03d}",
+        fecha_linda,
+        hora_ini,
+        hora_fin,
+        f"{duracion:.2f} s",
+        clasificacion_csv(nivel_max),
+        f"-{max_izq:.2f} px",
+        f"+{max_der:.2f} px",
+        f"-{max_abj:.2f} px",
+        f"+{max_arr:.2f} px",
+        nombre_archivo,
+    ])
+
+    try:
+        with open(ARCHIVO_REGISTRO_CSV, mode="a", newline="", encoding="utf-8-sig") as f:
+            csv.writer(f, delimiter=";").writerow(fila)
+    except PermissionError:
+        respaldo = os.path.join(CARPETA_GRABACIONES, "registro_sismos_respaldo.csv")
+        with open(respaldo, mode="a", newline="", encoding="utf-8-sig") as f:
+            csv.writer(f, delimiter=";").writerow(fila)
+        print(f"AVISO: no se pudo escribir {ARCHIVO_REGISTRO_CSV} (¿está abierto en Excel?). "
+              f"El evento quedó en {respaldo}")
 
 
 inicializar_carpeta_registro()
 
-cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture(INDICE_CAMARA)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, ANCHO_CAPTURA)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, ALTO_CAPTURA)
 
 ret, prev_frame = cap.read()
 if not ret:
     cap.release()
-    exit()
+    sys.exit(f"No se pudo leer la cámara (índice {INDICE_CAMARA}). "
+             "Revisa que esté conectada y que otra aplicación no la esté usando.")
 
 prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
 H_img, W_img = prev_gray.shape
@@ -425,6 +446,9 @@ H_img, W_img = prev_gray.shape
 fps_cam = cap.get(cv2.CAP_PROP_FPS)
 if not fps_cam or fps_cam <= 1 or fps_cam > 120:
     fps_cam = 30.0
+
+fps_medido = fps_cam
+t_cuadro_ant = time.time()
 
 MAX_PUNTOS_AUTO = 10
 MAX_PUNTOS_MANUAL = 10
@@ -434,12 +458,9 @@ lk_params = dict(
     criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
 )
 
-# Inicia en modo manual para que el usuario coloque los puntos; presionar 'C' activa autopuntos
 p0 = None
 modo_manual = True
 
-UMBRAL_MOVIMIENTO_EJE = 0.25
-UMBRAL_VIENTO = 2.80
 CUADROS_MIN_SISMO = 2
 ERROR_MAX_FLUJO = 25.0
 
@@ -465,6 +486,9 @@ max_izq_ev = 0.0
 max_der_ev = 0.0
 max_abj_ev = 0.0
 max_arr_ev = 0.0
+origen_ev_x = 0.0
+origen_ev_y = 0.0
+hist_pos = deque(maxlen=CUADROS_MIN_SISMO + 1)
 
 MARGEN_POST_SISMO = 2.0
 gauge_t = 0.0
@@ -481,8 +505,8 @@ def finalizar_grabacion():
     writer_video = None
     grabando = False
 
-    hora_fin_ev = time.strftime("%H:%M:%S")
-    duracion = max(0.1, time.time() - t_inicio_ev)
+    hora_fin_ev = time.strftime("%H:%M:%S", time.localtime(ultimo_pico_t))
+    duracion = max(0.1, ultimo_pico_t - t_inicio_ev)
     etiqueta_niv = nombre_nivel_corto(nivel_max_ev)
     pico_total_ref = max(max_der_ev, max_izq_ev, max_arr_ev, max_abj_ev)
 
@@ -541,202 +565,208 @@ def manejar_clic(event, x, y, flags, param):
 cv2.namedWindow(NOMBRE_VENTANA)
 cv2.setMouseCallback(NOMBRE_VENTANA, manejar_clic)
 
-while cap.isOpened():
-    ret, frame = cap.read()
-    if not ret:
-        break
+try:
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
 
-    ahora = time.time()
-    curr_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    dx_frame, dy_frame = 0.0, 0.0
-    movimiento_bruto = 0.0
+        ahora = time.time()
+        dt_cuadro = ahora - t_cuadro_ant
+        t_cuadro_ant = ahora
+        if dt_cuadro > 0:
+            fps_medido = 0.95 * fps_medido + 0.05 * (1.0 / dt_cuadro)
 
-    if p0 is not None and len(p0) > 0:
-        p1, st, err = cv2.calcOpticalFlowPyrLK(
-            prev_gray, curr_gray, p0, None, **lk_params
-        )
-        if p1 is not None and st is not None:
-            validos = st.ravel() == 1
-            if err is not None:
-                validos = validos & (err.ravel() < ERROR_MAX_FLUJO)
+        curr_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        dx_frame, dy_frame = 0.0, 0.0
+        movimiento_bruto = 0.0
 
-            buenos_antiguos = p0[validos]
-            buenos_nuevos = p1[validos]
+        if p0 is not None and len(p0) > 0:
+            p1, st, err = cv2.calcOpticalFlowPyrLK(
+                prev_gray, curr_gray, p0, None, **lk_params
+            )
+            if p1 is not None and st is not None:
+                validos = st.ravel() == 1
+                if err is not None:
+                    validos = validos & (err.ravel() < ERROR_MAX_FLUJO)
 
-            if len(buenos_nuevos) > 0:
-                en_rango = (
-                    (buenos_nuevos[:, 0, 0] >= 10) & (buenos_nuevos[:, 0, 0] < W_img - 10) &
-                    (buenos_nuevos[:, 0, 1] >= 10) & (buenos_nuevos[:, 0, 1] < H_img - 10)
-                )
-                buenos_antiguos = buenos_antiguos[en_rango]
-                buenos_nuevos = buenos_nuevos[en_rango]
+                buenos_antiguos = p0[validos]
+                buenos_nuevos = p1[validos]
 
-            if len(buenos_nuevos) > 0:
-                desplazamientos = buenos_nuevos.reshape(-1, 2) - buenos_antiguos.reshape(-1, 2)
-                vector_mediano = np.median(desplazamientos, axis=0)
+                if len(buenos_nuevos) > 0:
+                    en_rango = (
+                        (buenos_nuevos[:, 0, 0] >= 10) & (buenos_nuevos[:, 0, 0] < W_img - 10) &
+                        (buenos_nuevos[:, 0, 1] >= 10) & (buenos_nuevos[:, 0, 1] < H_img - 10)
+                    )
+                    buenos_antiguos = buenos_antiguos[en_rango]
+                    buenos_nuevos = buenos_nuevos[en_rango]
 
-                dist_mediana = np.linalg.norm(desplazamientos - vector_mediano, axis=1)
-                mad = float(np.median(dist_mediana))
-                limite_outlier = max(3.5, 1.8 * mad)
-                inliers = dist_mediana <= limite_outlier
+                if len(buenos_nuevos) > 0:
+                    desplazamientos = buenos_nuevos.reshape(-1, 2) - buenos_antiguos.reshape(-1, 2)
+                    vector_mediano = np.median(desplazamientos, axis=0)
 
-                if np.any(inliers):
-                    vector_consenso = np.median(desplazamientos[inliers], axis=0)
-                    buenos_nuevos = buenos_nuevos[inliers]
+                    dist_mediana = np.linalg.norm(desplazamientos - vector_mediano, axis=1)
+                    mad = float(np.median(dist_mediana))
+                    limite_outlier = max(3.5, 1.8 * mad)
+                    inliers = dist_mediana <= limite_outlier
+
+                    if np.any(inliers):
+                        vector_consenso = np.median(desplazamientos[inliers], axis=0)
+                        buenos_nuevos = buenos_nuevos[inliers]
+                    else:
+                        vector_consenso = vector_mediano
+
+                    movimiento_bruto = float(np.linalg.norm(vector_consenso))
+
+                    raw_dx = -float(vector_consenso[0])
+                    raw_dy = float(vector_consenso[1])
+                    if abs(raw_dx) >= UMBRAL_MOVIMIENTO_EJE:
+                        dx_frame = raw_dx
+                    if abs(raw_dy) >= UMBRAL_MOVIMIENTO_EJE:
+                        dy_frame = raw_dy
+
+                    p0 = buenos_nuevos.reshape(-1, 1, 2)
                 else:
-                    vector_consenso = vector_mediano
-
-                movimiento_bruto = float(np.linalg.norm(vector_consenso))
-
-                raw_dx = -float(vector_consenso[0])
-                raw_dy = float(vector_consenso[1])
-                if abs(raw_dx) >= UMBRAL_MOVIMIENTO_EJE:
-                    dx_frame = raw_dx
-                if abs(raw_dy) >= UMBRAL_MOVIMIENTO_EJE:
-                    dy_frame = raw_dy
-
-                p0 = buenos_nuevos.reshape(-1, 1, 2)
+                    p0 = None
             else:
                 p0 = None
+
+        if not modo_manual and movimiento_bruto < 15.0 and (p0 is None or len(p0) < MAX_PUNTOS_AUTO):
+            p0 = detectar_puntos_distribuidos(curr_gray, p0, max_puntos=MAX_PUNTOS_AUTO)
+
+        if mostrar_puntos and p0 is not None and len(p0) > 0:
+            for pt in p0:
+                nx, ny = map(int, pt.ravel())
+                if modo_manual:
+                    cv2.circle(frame, (nx, ny), 6, CIAN, 1, cv2.LINE_8)
+                    cv2.circle(frame, (nx, ny), 2, BLANCO, -1, cv2.LINE_8)
+                else:
+                    cv2.circle(frame, (nx, ny), 3, (230, 230, 230), -1, cv2.LINE_8)
+
+        cant_actual = len(p0) if p0 is not None else 0
+        magnitud_mov = math.hypot(dx_frame, dy_frame)
+
+        if magnitud_mov >= UMBRAL_VIENTO:
+            rachas_movimiento += 1
         else:
-            p0 = None
+            rachas_movimiento = 0
 
-    if not modo_manual and movimiento_bruto < 15.0 and (p0 is None or len(p0) < MAX_PUNTOS_AUTO):
-        p0 = detectar_puntos_distribuidos(curr_gray, p0, max_puntos=MAX_PUNTOS_AUTO)
+        intensidad_actual = magnitud_mov if rachas_movimiento >= CUADROS_MIN_SISMO else 0.0
 
-    if mostrar_puntos and p0 is not None and len(p0) > 0:
-        for pt in p0:
-            nx, ny = map(int, pt.ravel())
-            if modo_manual:
-                cv2.circle(frame, (nx, ny), 6, CIAN, 1, cv2.LINE_8)
-                cv2.circle(frame, (nx, ny), 2, BLANCO, -1, cv2.LINE_8)
-            else:
-                cv2.circle(frame, (nx, ny), 3, (230, 230, 230), -1, cv2.LINE_8)
+        if cant_actual == 0 and modo_manual:
+            nivel_retenido = 0
+            estado_retenido = "Sin Puntos - EN ESPERA"
+            color_retenido = GRIS
+            intensidad_retenida = 0.0
+            rachas_movimiento = 0
+        else:
+            if magnitud_mov >= UMBRAL_MOVIMIENTO_EJE:
+                pos_total_x += dx_frame
+                pos_total_y += dy_frame
 
-    cant_actual = len(p0) if p0 is not None else 0
-    magnitud_mov = math.hypot(dx_frame, dy_frame)
+            estado_actual, color_actual, nivel_actual = evaluar_nivel(intensidad_actual)
 
-    if magnitud_mov >= UMBRAL_VIENTO:
-        rachas_movimiento += 1
-    else:
-        rachas_movimiento = 0
-
-    intensidad_actual = magnitud_mov if rachas_movimiento >= CUADROS_MIN_SISMO else 0.0
-
-    if cant_actual == 0 and modo_manual:
-        nivel_retenido = 0
-        estado_retenido = "Sin Puntos - EN ESPERA"
-        color_retenido = GRIS
-        intensidad_retenida = 0.0
-        rachas_movimiento = 0
-    else:
-        # Acumula X e Y también en movimientos lentos/leves (>= UMBRAL_MOVIMIENTO_EJE) sin disparar alerta de sismo
-        if magnitud_mov >= UMBRAL_MOVIMIENTO_EJE:
-            pos_total_x += dx_frame
-            pos_total_y += dy_frame
-
-        estado_actual, color_actual, nivel_actual = evaluar_nivel(intensidad_actual)
-
-        if nivel_actual >= nivel_retenido and nivel_actual > 0:
-            nivel_retenido = nivel_actual
-            estado_retenido = estado_actual
-            color_retenido = color_actual
-            intensidad_retenida = max(intensidad_retenida, intensidad_actual)
-            ultimo_pico_t = ahora
-        elif nivel_retenido > 0:
-            if intensidad_actual >= intensidad_retenida * 0.6:
-                intensidad_retenida = intensidad_actual
-            if (ahora - ultimo_pico_t) > TIEMPO_RETENCION:
+            if nivel_actual >= nivel_retenido and nivel_actual > 0:
                 nivel_retenido = nivel_actual
                 estado_retenido = estado_actual
                 color_retenido = color_actual
+                intensidad_retenida = max(intensidad_retenida, intensidad_actual)
+                ultimo_pico_t = ahora
+            elif nivel_retenido > 0:
+                if intensidad_actual >= intensidad_retenida * 0.6:
+                    intensidad_retenida = intensidad_actual
+                if (ahora - ultimo_pico_t) > TIEMPO_RETENCION:
+                    nivel_retenido = nivel_actual
+                    estado_retenido = estado_actual
+                    color_retenido = color_actual
+                    intensidad_retenida = intensidad_actual
+                    if nivel_actual > 0:
+                        ultimo_pico_t = ahora
+            elif nivel_retenido == 0:
+                estado_retenido = estado_actual
+                color_retenido = color_actual
                 intensidad_retenida = intensidad_actual
-                if nivel_actual > 0:
-                    ultimo_pico_t = ahora
-        elif nivel_retenido == 0:
-            estado_retenido = estado_actual
-            color_retenido = color_actual
-            intensidad_retenida = intensidad_actual
 
-    if nivel_retenido > 0:
-        intensidad_barra = max(intensidad_actual, intensidad_retenida * 0.75)
-    else:
-        intensidad_barra = intensidad_actual
-
-    objetivo_gauge = pos_gauge(intensidad_barra)
-    velocidad_gauge = 0.55 if objetivo_gauge > gauge_t else 0.18
-    gauge_t += (objetivo_gauge - gauge_t) * velocidad_gauge
-
-    pico_actual_ref = max(max_izq_ev, max_der_ev, max_arr_ev, max_abj_ev)
-    dibujar_hud(
-        frame, pos_total_x, pos_total_y, estado_retenido, nivel_retenido, color_retenido,
-        gauge_t, ahora, modo_manual=modo_manual, cant_puntos=cant_actual,
-        grabando=grabando, pico_evento=pico_actual_ref
-    )
-
-    if nivel_retenido > 0:
-        t_ultimo_mov_ev = ahora
-        if not grabando:
-            grabando = True
-            fecha_inicio_ev = time.strftime("%Y-%m-%d")
-            hora_inicio_ev = time.strftime("%H:%M:%S")
-            t_inicio_ev = ahora
-            nivel_max_ev = nivel_retenido
-
-            max_izq_ev = abs(min(0.0, pos_total_x))
-            max_der_ev = max(0.0, pos_total_x)
-            max_abj_ev = abs(min(0.0, pos_total_y))
-            max_arr_ev = max(0.0, pos_total_y)
-
-            ruta_temp_video = os.path.join(CARPETA_GRABACIONES, f"grabando_{int(ahora)}.mp4")
-            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-            writer_video = cv2.VideoWriter(ruta_temp_video, fourcc, fps_cam, (W_img, H_img))
-
-            for f_prev in buffer_previo:
-                writer_video.write(f_prev)
-            buffer_previo.clear()
+        if nivel_retenido > 0:
+            intensidad_barra = max(intensidad_actual, intensidad_retenida * 0.75)
         else:
-            if nivel_retenido > nivel_max_ev:
+            intensidad_barra = intensidad_actual
+
+        objetivo_gauge = pos_gauge(intensidad_barra)
+        velocidad_gauge = 0.55 if objetivo_gauge > gauge_t else 0.18
+        gauge_t += (objetivo_gauge - gauge_t) * velocidad_gauge
+
+        pico_actual_ref = max(max_izq_ev, max_der_ev, max_arr_ev, max_abj_ev)
+        dibujar_hud(
+            frame, pos_total_x, pos_total_y, estado_retenido, nivel_retenido, color_retenido,
+            gauge_t, ahora, modo_manual=modo_manual, cant_puntos=cant_actual,
+            grabando=grabando, pico_evento=pico_actual_ref
+        )
+
+        hist_pos.append((pos_total_x, pos_total_y))
+
+        if nivel_retenido > 0:
+            t_ultimo_mov_ev = ahora
+            if not grabando:
+                grabando = True
+                fecha_inicio_ev = time.strftime("%Y-%m-%d")
+                hora_inicio_ev = time.strftime("%H:%M:%S")
+                t_inicio_ev = ahora
                 nivel_max_ev = nivel_retenido
 
-            if pos_total_x < 0 and abs(pos_total_x) > max_izq_ev:
-                max_izq_ev = abs(pos_total_x)
-            if pos_total_x > 0 and pos_total_x > max_der_ev:
-                max_der_ev = pos_total_x
-            if pos_total_y < 0 and abs(pos_total_y) > max_abj_ev:
-                max_abj_ev = abs(pos_total_y)
-            if pos_total_y > 0 and pos_total_y > max_arr_ev:
-                max_arr_ev = pos_total_y
+                origen_ev_x, origen_ev_y = hist_pos[0]
+                max_izq_ev = max_der_ev = max_abj_ev = max_arr_ev = 0.0
 
-        if writer_video is not None:
-            writer_video.write(frame)
-    else:
-        if grabando:
+                ruta_temp_video = os.path.join(CARPETA_GRABACIONES, f"grabando_{int(ahora)}.mp4")
+                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                fps_video = min(120.0, max(5.0, fps_medido))
+                writer_video = cv2.VideoWriter(ruta_temp_video, fourcc, fps_video, (W_img, H_img))
+
+                for f_prev in buffer_previo:
+                    writer_video.write(f_prev)
+                buffer_previo.clear()
+            else:
+                if nivel_retenido > nivel_max_ev:
+                    nivel_max_ev = nivel_retenido
+
+            rel_x = pos_total_x - origen_ev_x
+            rel_y = pos_total_y - origen_ev_y
+            max_izq_ev = max(max_izq_ev, -rel_x)
+            max_der_ev = max(max_der_ev, rel_x)
+            max_abj_ev = max(max_abj_ev, -rel_y)
+            max_arr_ev = max(max_arr_ev, rel_y)
+
             if writer_video is not None:
                 writer_video.write(frame)
-            if (ahora - t_ultimo_mov_ev) >= MARGEN_POST_SISMO:
-                finalizar_grabacion()
         else:
-            buffer_previo.append(frame.copy())
+            if grabando:
+                if writer_video is not None:
+                    writer_video.write(frame)
+                if (ahora - t_ultimo_mov_ev) >= MARGEN_POST_SISMO:
+                    finalizar_grabacion()
+            else:
+                buffer_previo.append(frame.copy())
 
-    cv2.imshow(NOMBRE_VENTANA, frame)
+        cv2.imshow(NOMBRE_VENTANA, frame)
 
-    prev_gray = curr_gray.copy()
+        prev_gray = curr_gray
 
-    tecla = cv2.waitKey(1) & 0xFF
-    if tecla == ord("q"):
-        break
-    if tecla == ord("p"):
-        mostrar_puntos = not mostrar_puntos
-    if tecla == ord("c"):
-        modo_manual = False
-        p0 = detectar_puntos_distribuidos(curr_gray, max_puntos=MAX_PUNTOS_AUTO)
-    if tecla == ord("r"):
-        pos_total_x = 0.0
-        pos_total_y = 0.0
-
-if grabando:
-    finalizar_grabacion()
-
-cap.release()
-cv2.destroyAllWindows()
+        tecla = chr(cv2.waitKey(1) & 0xFF).lower()
+        if tecla == "q":
+            break
+        if tecla == "p":
+            mostrar_puntos = not mostrar_puntos
+        if tecla == "c":
+            modo_manual = False
+            p0 = detectar_puntos_distribuidos(curr_gray, max_puntos=MAX_PUNTOS_AUTO)
+        if tecla == "r":
+            pos_total_x = 0.0
+            pos_total_y = 0.0
+            hist_pos.clear()
+except KeyboardInterrupt:
+    pass
+finally:
+    if grabando:
+        finalizar_grabacion()
+    cap.release()
+    cv2.destroyAllWindows()
