@@ -29,6 +29,7 @@ UMBRAL_MOVIMIENTO_EJE = 0.25
 UMBRAL_VIENTO = 2.80
 UMBRAL_FUERTE = 8.0
 UMBRAL_TERREMOTO = 25.0
+TIEMPO_AUTO_RESET = 2.0
 
 CARPETA_BASE = os.path.dirname(os.path.abspath(__file__))
 CARPETA_GRABACIONES = os.path.join(CARPETA_BASE, "grabaciones_sismos")
@@ -245,7 +246,7 @@ def dibujar_hud(
     color_etiqueta = ROJO if cant_puntos == 0 else (CIAN if modo_manual else GRIS)
     etiqueta_pts = f"PUNTOS {'MANUAL' if modo_manual else 'AUTO'}: {cant_puntos}"
     texto(frame, etiqueta_pts, (W - m, m + ch + S(22)), 0.42 * s, color_etiqueta, 1,
-          espaciado=S(1), ancla="der", sombra=True)
+          espaciado=S(1), ancla="der", sombra=False)
 
     if grabando:
         rw, rh = S(185), S(34)
@@ -263,8 +264,8 @@ def dibujar_hud(
         texto(frame, "TERREMOTO", ((W) // 2, H - m - bh2 // 2 + S(12)), 1.25 * s, BLANCO, max(2, S(2)),
               ancla="centro", sombra=True)
     elif mostrar_ayuda:
-        texto(frame, "CLIC IZQ: PONER PUNTO   CLIC DER: QUITAR   C: AUTO   P: MOSTRAR/OCULTAR PUNTOS   R: RESET   Q: SALIR",
-              (m, H - S(18)), 0.38 * s, oscurecer(GRIS, 0.9), 1, espaciado=S(1), sombra=True)
+        texto(frame, "IZQ: PONER   DER: QUITAR   C: AUTO   P: PUNTOS   M: PAUSAR   Q: SALIR",
+              (W // 2, H - S(16)), 0.36 * s, oscurecer(GRIS, 0.9), 1, espaciado=S(1), ancla="centro", sombra=True)
 
 
 def detectar_puntos_distribuidos(gray, puntos_existentes=None, max_puntos=10):
@@ -331,6 +332,25 @@ def detectar_puntos_distribuidos(gray, puntos_existentes=None, max_puntos=10):
         return arr_nuevos[:max_puntos]
 
     return puntos_existentes
+
+
+def anclar_mejor_esquina(gray, x, y, radio=15):
+    H, W = gray.shape
+    x1 = max(10, int(x) - radio)
+    y1 = max(10, int(y) - radio)
+    x2 = min(W - 10, int(x) + radio)
+    y2 = min(H - 10, int(y) + radio)
+    if x2 <= x1 or y2 <= y1:
+        return np.array([[[float(x), float(y)]]], dtype=np.float32)
+
+    mascara = np.zeros_like(gray)
+    mascara[y1:y2, x1:x2] = 255
+    pt = cv2.goodFeaturesToTrack(
+        gray, mask=mascara, maxCorners=1, qualityLevel=0.01, minDistance=5, blockSize=7
+    )
+    if pt is not None:
+        return pt.astype(np.float32).reshape(1, 1, 2)
+    return np.array([[[float(x), float(y)]]], dtype=np.float32)
 
 
 def evaluar_nivel(mag):
@@ -449,20 +469,25 @@ if not fps_cam or fps_cam <= 1 or fps_cam > 120:
 
 fps_medido = fps_cam
 t_cuadro_ant = time.time()
+t_ultima_actividad = time.time()
 
 MAX_PUNTOS_AUTO = 10
 MAX_PUNTOS_MANUAL = 10
 lk_params = dict(
-    winSize=(41, 41),
-    maxLevel=4,
+    winSize=(65, 65),
+    maxLevel=5,
     criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
 )
 
 p0 = None
+fallos_pts = np.empty((0,), dtype=np.int32)
 modo_manual = True
+deteccion_activa = True
 
 CUADROS_MIN_SISMO = 2
-ERROR_MAX_FLUJO = 25.0
+ERROR_MAX_FLUJO = 80.0
+ERROR_MAX_IDA_VUELTA = 12.0
+MAX_CUADROS_PERDIDO = 8
 
 rachas_movimiento = 0
 TIEMPO_RETENCION = 1.5
@@ -534,22 +559,26 @@ def finalizar_grabacion():
 
 
 def manejar_clic(event, x, y, flags, param):
-    global p0, modo_manual, mostrar_puntos
+    global p0, fallos_pts, modo_manual, mostrar_puntos
 
     if event == cv2.EVENT_LBUTTONDOWN:
         mostrar_puntos = True
-        nuevo_pt = np.array([[[float(x), float(y)]]], dtype=np.float32)
+        nuevo_pt = anclar_mejor_esquina(prev_gray, x, y)
 
         if not modo_manual:
             modo_manual = True
             p0 = nuevo_pt
+            fallos_pts = np.zeros((1,), dtype=np.int32)
         else:
             if p0 is None or len(p0) == 0:
                 p0 = nuevo_pt
+                fallos_pts = np.zeros((1,), dtype=np.int32)
             elif len(p0) < MAX_PUNTOS_MANUAL:
                 p0 = np.vstack((p0, nuevo_pt))
+                fallos_pts = np.append(fallos_pts, 0)
             else:
                 p0 = np.vstack((p0[1:], nuevo_pt))
+                fallos_pts = np.append(fallos_pts[1:], 0)
 
     elif event == cv2.EVENT_RBUTTONDOWN:
         if p0 is not None and len(p0) > 0:
@@ -558,6 +587,7 @@ def manejar_clic(event, x, y, flags, param):
             idx_cercano = int(np.argmin(distancias))
             if distancias[idx_cercano] <= 25.0:
                 p0 = np.delete(p0, idx_cercano, axis=0)
+                fallos_pts = np.delete(fallos_pts, idx_cercano, axis=0)
                 if len(p0) == 0:
                     p0 = None
 
@@ -581,7 +611,56 @@ try:
         dx_frame, dy_frame = 0.0, 0.0
         movimiento_bruto = 0.0
 
+        if not deteccion_activa:
+            if grabando:
+                finalizar_grabacion()
+            pos_total_x = 0.0
+            pos_total_y = 0.0
+            nivel_retenido = 0
+            estado_retenido = "Mantenimiento - DETECCION PAUSADA"
+            color_retenido = CIAN
+            intensidad_retenida = 0.0
+            rachas_movimiento = 0
+            gauge_t += (0.0 - gauge_t) * 0.25
+            hist_pos.clear()
+            buffer_previo.clear()
+
+            if mostrar_puntos and p0 is not None and len(p0) > 0:
+                for pt in p0:
+                    nx, ny = map(int, pt.ravel())
+                    cv2.circle(frame, (nx, ny), 6, GRIS, 1, cv2.LINE_8)
+                    cv2.circle(frame, (nx, ny), 2, BLANCO, -1, cv2.LINE_8)
+
+            cant_actual = len(p0) if p0 is not None else 0
+            dibujar_hud(
+                frame, pos_total_x, pos_total_y, estado_retenido, nivel_retenido, color_retenido,
+                gauge_t, ahora, modo_manual=modo_manual, cant_puntos=cant_actual,
+                grabando=False, pico_evento=0.0
+            )
+            cv2.imshow(NOMBRE_VENTANA, frame)
+            prev_gray = curr_gray
+
+            tecla = chr(cv2.waitKey(1) & 0xFF).lower()
+            if tecla == "q":
+                break
+            if tecla == "p":
+                mostrar_puntos = not mostrar_puntos
+            if tecla == "c":
+                modo_manual = False
+                p0 = detectar_puntos_distribuidos(curr_gray, max_puntos=MAX_PUNTOS_AUTO)
+                fallos_pts = np.zeros((len(p0),), dtype=np.int32) if p0 is not None else np.empty((0,), dtype=np.int32)
+            if tecla == "m":
+                deteccion_activa = True
+                t_ultima_actividad = ahora
+                if not modo_manual:
+                    p0 = detectar_puntos_distribuidos(curr_gray, max_puntos=MAX_PUNTOS_AUTO)
+                    fallos_pts = np.zeros((len(p0),), dtype=np.int32) if p0 is not None else np.empty((0,), dtype=np.int32)
+            continue
+
         if p0 is not None and len(p0) > 0:
+            if len(fallos_pts) != len(p0):
+                fallos_pts = np.zeros((len(p0),), dtype=np.int32)
+
             p1, st, err = cv2.calcOpticalFlowPyrLK(
                 prev_gray, curr_gray, p0, None, **lk_params
             )
@@ -590,49 +669,74 @@ try:
                 if err is not None:
                     validos = validos & (err.ravel() < ERROR_MAX_FLUJO)
 
-                buenos_antiguos = p0[validos]
-                buenos_nuevos = p1[validos]
+                p0_vuelta, st_vuelta, _ = cv2.calcOpticalFlowPyrLK(
+                    curr_gray, prev_gray, p1, None, **lk_params
+                )
+                if p0_vuelta is not None and st_vuelta is not None:
+                    err_fb = np.linalg.norm(p0.reshape(-1, 2) - p0_vuelta.reshape(-1, 2), axis=1)
+                    validos = validos & (st_vuelta.ravel() == 1) & (err_fb < ERROR_MAX_IDA_VUELTA)
 
-                if len(buenos_nuevos) > 0:
-                    en_rango = (
-                        (buenos_nuevos[:, 0, 0] >= 10) & (buenos_nuevos[:, 0, 0] < W_img - 10) &
-                        (buenos_nuevos[:, 0, 1] >= 10) & (buenos_nuevos[:, 0, 1] < H_img - 10)
-                    )
-                    buenos_antiguos = buenos_antiguos[en_rango]
-                    buenos_nuevos = buenos_nuevos[en_rango]
+                cand_pts = np.where(validos[:, None, None], p1, p0)
+                en_pantalla = (
+                    (cand_pts[:, 0, 0] >= 5) & (cand_pts[:, 0, 0] < W_img - 5) &
+                    (cand_pts[:, 0, 1] >= 5) & (cand_pts[:, 0, 1] < H_img - 5)
+                )
 
-                if len(buenos_nuevos) > 0:
-                    desplazamientos = buenos_nuevos.reshape(-1, 2) - buenos_antiguos.reshape(-1, 2)
+                validos_en_pantalla = validos & en_pantalla
+                if np.any(validos_en_pantalla):
+                    desplazamientos = p1[validos_en_pantalla].reshape(-1, 2) - p0[validos_en_pantalla].reshape(-1, 2)
                     vector_mediano = np.median(desplazamientos, axis=0)
-
                     dist_mediana = np.linalg.norm(desplazamientos - vector_mediano, axis=1)
                     mad = float(np.median(dist_mediana))
-                    limite_outlier = max(3.5, 1.8 * mad)
+                    limite_outlier = max(14.0, 3.5 * mad)
                     inliers = dist_mediana <= limite_outlier
 
                     if np.any(inliers):
                         vector_consenso = np.median(desplazamientos[inliers], axis=0)
-                        buenos_nuevos = buenos_nuevos[inliers]
                     else:
                         vector_consenso = vector_mediano
 
                     movimiento_bruto = float(np.linalg.norm(vector_consenso))
-
                     raw_dx = -float(vector_consenso[0])
                     raw_dy = float(vector_consenso[1])
                     if abs(raw_dx) >= UMBRAL_MOVIMIENTO_EJE:
                         dx_frame = raw_dx
                     if abs(raw_dy) >= UMBRAL_MOVIMIENTO_EJE:
                         dy_frame = raw_dy
+                else:
+                    vector_consenso = np.zeros(2, dtype=np.float32)
 
-                    p0 = buenos_nuevos.reshape(-1, 1, 2)
+                nuevos_p0 = []
+                nuevos_fallos = []
+                for idx in range(len(p0)):
+                    if not en_pantalla[idx]:
+                        continue
+                    if validos[idx]:
+                        nuevos_p0.append(p1[idx])
+                        nuevos_fallos.append(0)
+                    else:
+                        f_actual = fallos_pts[idx] + 1
+                        if f_actual <= MAX_CUADROS_PERDIDO:
+                            pt_pred = p0[idx].copy()
+                            pt_pred[0, 0] += vector_consenso[0]
+                            pt_pred[0, 1] += vector_consenso[1]
+                            if 5 <= pt_pred[0, 0] < W_img - 5 and 5 <= pt_pred[0, 1] < H_img - 5:
+                                nuevos_p0.append(pt_pred)
+                                nuevos_fallos.append(f_actual)
+
+                if len(nuevos_p0) > 0:
+                    p0 = np.array(nuevos_p0, dtype=np.float32).reshape(-1, 1, 2)
+                    fallos_pts = np.array(nuevos_fallos, dtype=np.int32)
                 else:
                     p0 = None
+                    fallos_pts = np.empty((0,), dtype=np.int32)
             else:
                 p0 = None
+                fallos_pts = np.empty((0,), dtype=np.int32)
 
         if not modo_manual and movimiento_bruto < 15.0 and (p0 is None or len(p0) < MAX_PUNTOS_AUTO):
             p0 = detectar_puntos_distribuidos(curr_gray, p0, max_puntos=MAX_PUNTOS_AUTO)
+            fallos_pts = np.zeros((len(p0),), dtype=np.int32) if p0 is not None else np.empty((0,), dtype=np.int32)
 
         if mostrar_puntos and p0 is not None and len(p0) > 0:
             for pt in p0:
@@ -663,6 +767,12 @@ try:
             if magnitud_mov >= UMBRAL_MOVIMIENTO_EJE:
                 pos_total_x += dx_frame
                 pos_total_y += dy_frame
+                t_ultima_actividad = ahora
+            elif not grabando and nivel_retenido == 0 and (pos_total_x != 0.0 or pos_total_y != 0.0):
+                if (ahora - t_ultima_actividad) >= TIEMPO_AUTO_RESET:
+                    pos_total_x = 0.0
+                    pos_total_y = 0.0
+                    hist_pos.clear()
 
             estado_actual, color_actual, nivel_actual = evaluar_nivel(intensidad_actual)
 
@@ -759,10 +869,9 @@ try:
         if tecla == "c":
             modo_manual = False
             p0 = detectar_puntos_distribuidos(curr_gray, max_puntos=MAX_PUNTOS_AUTO)
-        if tecla == "r":
-            pos_total_x = 0.0
-            pos_total_y = 0.0
-            hist_pos.clear()
+            fallos_pts = np.zeros((len(p0),), dtype=np.int32) if p0 is not None else np.empty((0,), dtype=np.int32)
+        if tecla == "m":
+            deteccion_activa = False
 except KeyboardInterrupt:
     pass
 finally:
